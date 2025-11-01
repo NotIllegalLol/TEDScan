@@ -1,33 +1,13 @@
 services:
-  - type: web
+  - type: worker
     name: ted-telegram-bot
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        value: 8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw
       - key: TELEGRAM_CHAT_ID
-        sync: false
+        value: 2133274440
       - key: TED_API_KEY
-        sync: false
-```
-
-## **Setup Steps for Render.com:**
-
-### **1. Upload Files to GitHub**
-Upload these files to your repo:
-- `bot.py` (the code from the artifact above)
-- `requirements.txt`
-
-### **2. Configure Render.com**
-
-In your Render dashboard:
-
-1. **Go to your Web Service**
-2. **Click "Environment"** in the left menu
-3. **Add these Environment Variables:**
-```
-TELEGRAM_BOT_TOKEN = 8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw
-TELEGRAM_CHAT_ID = 2133274440
-TED_API_KEY = 0f0d8c2f68bb46bab7afa51c46053433
+        value: 0f0d8c2f68bb46bab7afa51c46053433
