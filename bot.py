@@ -198,7 +198,7 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 7) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 2) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
