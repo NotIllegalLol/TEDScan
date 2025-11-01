@@ -1,35 +1,50 @@
 """
-TED Telegram Bot - Render.com Compatible Version
-Complete 3-step processing: Fetch, Convert, Filter
+TED Telegram Bot - Replit 24/7 Version
+Includes Flask web server to keep Repl alive
 """
 
 import os
+import sys
 import time
 import logging
 from datetime import datetime, timedelta
 from threading import Thread
 import telebot
 import requests
-import json
-import re
 from typing import List, Dict, Tuple
 
+# Flask web server to keep Repl alive
+from flask import Flask
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "TED Bot is running! ✅"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
 
 class TEDDataCollector:
-    """Complete TED collector with all original Scan.py logic"""
+    """Complete TED collector with 3-step logic"""
     
     def __init__(self, api_key: str = None):
         self.api_key = api_key
         self.search_api_url = "https://api.ted.europa.eu/v3/notices/search"
         self.logger = logging.getLogger(__name__)
         
-        # Fallback exchange rates (Nov 2024)
+        # Exchange rates (Nov 2024)
         self.fallback_rates = {
             'USD': 0.92, 'GBP': 1.17, 'CHF': 1.06, 
             'SEK': 0.088, 'DKK': 0.134, 'NOK': 0.086,
@@ -39,18 +54,18 @@ class TEDDataCollector:
         }
     
     def convert_to_eur(self, amount: float, currency: str) -> float:
-        """Convert amount to EUR with fallback rates"""
+        """Convert amount to EUR"""
         if currency == "EUR" or not currency:
             return amount
         
         if currency in self.fallback_rates:
             return amount * self.fallback_rates[currency]
         
-        self.logger.warning(f"Unknown currency: {currency}, cannot convert")
+        self.logger.warning(f"Unknown currency: {currency}")
         return amount
     
     def fetch_all_contracts(self, days_back: int = 1) -> List[Dict]:
-        """Fetch all contracts from TED Search API - ORIGINAL LOGIC"""
+        """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
@@ -62,14 +77,12 @@ class TEDDataCollector:
             all_notices = []
             page = 1
             limit = 50
+            max_pages = 10
             
-            while True:
+            while page <= max_pages:
                 self.logger.info(f"Fetching page {page}...")
                 
-                if start_str == end_str:
-                    query = f"PD={start_str}"
-                else:
-                    query = f"PD>={start_str} AND PD<={end_str}"
+                query = f"PD={start_str}" if start_str == end_str else f"PD>={start_str} AND PD<={end_str}"
                 
                 request_body = {
                     "query": query,
@@ -95,45 +108,53 @@ class TEDDataCollector:
                 if self.api_key:
                     headers["apikey"] = self.api_key
                 
-                response = requests.post(self.search_api_url, json=request_body, headers=headers, timeout=30)
-                
-                if response.status_code != 200:
-                    self.logger.error(f"API returned status {response.status_code}: {response.text}")
+                try:
+                    response = requests.post(
+                        self.search_api_url, 
+                        json=request_body, 
+                        headers=headers, 
+                        timeout=30
+                    )
+                    
+                    if response.status_code != 200:
+                        self.logger.error(f"API status {response.status_code}")
+                        break
+                    
+                    data = response.json()
+                    notices = data.get("notices", [])
+                    total = data.get("total", 0)
+                    
+                    if not notices:
+                        break
+                    
+                    all_notices.extend(notices)
+                    self.logger.info(f"Got {len(notices)} notices (total: {len(all_notices)}/{total})")
+                    
+                    if len(all_notices) >= total or len(notices) < limit:
+                        break
+                    
+                    page += 1
+                    time.sleep(0.5)
+                    
+                except requests.exceptions.RequestException as e:
+                    self.logger.error(f"Request error: {e}")
                     break
-                
-                data = response.json()
-                notices = data.get("notices", [])
-                total = data.get("total", 0)
-                
-                if not notices:
-                    break
-                
-                all_notices.extend(notices)
-                self.logger.info(f"Got {len(notices)} notices (total: {len(all_notices)}/{total})")
-                
-                if len(all_notices) >= total or len(notices) < limit:
-                    break
-                
-                page += 1
-                time.sleep(0.5)
             
-            self.logger.info(f"Total contracts fetched: {len(all_notices)}")
+            self.logger.info(f"Total fetched: {len(all_notices)}")
             return all_notices
             
         except Exception as e:
-            self.logger.error(f"Error fetching TED data: {e}", exc_info=True)
+            self.logger.error(f"Fetch error: {e}", exc_info=True)
             return []
     
     def match_winners_to_lots(self, notice: Dict) -> List[Tuple[Dict, str, str]]:
-        """Match winners to lots with currency info - ORIGINAL LOGIC"""
+        """Match winners to lots"""
         lots = []
         
         def to_list(data):
             if data is None:
                 return []
-            if isinstance(data, list):
-                return data
-            return [data]
+            return data if isinstance(data, list) else [data]
         
         def extract_from_dict(data):
             if data is None:
@@ -181,69 +202,47 @@ class TEDDataCollector:
                 "tender_value": tender_values[i] if i < len(tender_values) else None,
             }
             
-            if len(lot_estimated_currencies) == 1:
-                est_currency = lot_estimated_currencies[0]
-            elif i < len(lot_estimated_currencies):
-                est_currency = lot_estimated_currencies[i]
-            else:
-                est_currency = "EUR"
+            est_currency = (lot_estimated_currencies[0] if len(lot_estimated_currencies) == 1 
+                           else lot_estimated_currencies[i] if i < len(lot_estimated_currencies) 
+                           else "EUR")
             
-            if len(tender_currencies) == 1:
-                tender_currency = tender_currencies[0]
-            elif i < len(tender_currencies):
-                tender_currency = tender_currencies[i]
-            else:
-                tender_currency = "EUR"
+            tender_currency = (tender_currencies[0] if len(tender_currencies) == 1 
+                              else tender_currencies[i] if i < len(tender_currencies) 
+                              else "EUR")
             
-            if len(winner_names) == num_lots:
-                lot_data["winner_name"] = winner_names[i] if i < len(winner_names) else "N/A"
-            elif len(winner_names) == 1:
-                lot_data["winner_name"] = winner_names[0]
-            else:
-                lot_data["winner_name"] = "N/A"
+            lot_data["winner_name"] = (winner_names[i] if len(winner_names) == num_lots and i < len(winner_names)
+                                      else winner_names[0] if len(winner_names) == 1 
+                                      else "N/A")
             
-            if len(winner_countries) == num_lots:
-                lot_data["winner_country"] = winner_countries[i] if i < len(winner_countries) else "N/A"
-            elif len(winner_countries) == 1:
-                lot_data["winner_country"] = winner_countries[0]
-            else:
-                lot_data["winner_country"] = "N/A"
+            lot_data["winner_country"] = (winner_countries[i] if len(winner_countries) == num_lots and i < len(winner_countries)
+                                         else winner_countries[0] if len(winner_countries) == 1 
+                                         else "N/A")
             
-            if len(winner_cities) == num_lots:
-                lot_data["winner_city"] = winner_cities[i] if i < len(winner_cities) else "N/A"
-            elif len(winner_cities) == 1:
-                lot_data["winner_city"] = winner_cities[0]
-            else:
-                lot_data["winner_city"] = "N/A"
+            lot_data["winner_city"] = (winner_cities[i] if len(winner_cities) == num_lots and i < len(winner_cities)
+                                      else winner_cities[0] if len(winner_cities) == 1 
+                                      else "N/A")
             
             lots.append((lot_data, est_currency, tender_currency))
         
         return lots
     
     def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 15_000_000) -> List[Dict]:
-        """
-        Filter for Form Type: result AND EUR Value >= 15M
-        COMPLETE 3-STEP LOGIC: Fetch → Convert → Filter
-        """
+        """Filter for result contracts >= 15M EUR"""
         self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
-        self.logger.info(f"Filter: Form Type='result' AND EUR Value >= €{min_value_eur:,.0f}")
+        self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
         
         high_value_contracts = []
         
         for notice in notices:
             try:
-                # Check Form Type
                 form_type = notice.get("form-type", "")
                 if not form_type or 'result' not in str(form_type).lower():
                     continue
                 
-                # Get lots with currency conversion
                 lots = self.match_winners_to_lots(notice)
-                
                 if not lots:
                     continue
                 
-                # Calculate total EUR value
                 total_eur = 0
                 converted_lots = []
                 
@@ -268,7 +267,6 @@ class TEDDataCollector:
                         except (ValueError, TypeError):
                             continue
                 
-                # Check if meets threshold
                 if total_eur >= min_value_eur:
                     high_value_contracts.append({
                         "publication_number": notice.get("publication-number", "N/A"),
@@ -286,7 +284,7 @@ class TEDDataCollector:
                     self.logger.info(f"Found: {notice.get('publication-number')} - €{total_eur:,.0f}")
                     
             except Exception as e:
-                self.logger.warning(f"Error processing notice: {e}")
+                self.logger.warning(f"Error processing: {e}")
                 continue
         
         self.logger.info(f"Found {len(high_value_contracts)} high-value contracts")
@@ -294,7 +292,7 @@ class TEDDataCollector:
 
 
 class TEDTelegramBot:
-    """Telegram bot with full Scan.py logic"""
+    """Telegram bot with auto-monitoring"""
     
     def __init__(self, bot_token: str, chat_id: str, ted_api_key: str):
         self.bot = telebot.TeleBot(bot_token)
@@ -312,22 +310,22 @@ class TEDTelegramBot:
             text = """
 🤖 *TED Contract Monitor Bot*
 
-Full 3-step scanning with currency conversion!
+Running 24/7 on Replit!
 
 *Commands:*
 /start - Show this message
-/status - Check bot status
-/scan - Run full 3-step scan now
+/status - Bot status
+/scan - Scan now
 /stop - Stop auto-scan
 /resume - Resume auto-scan
 
-*3-Step Process:*
-1️⃣ Fetch all contracts from TED
-2️⃣ Convert currencies to EUR
-3️⃣ Filter results ≥€15M
+*Monitoring:*
+✅ Scans every 10 minutes
+✅ Form type: result
+✅ Min value: €15,000,000
+✅ Auto currency conversion
 
-Running on Render.com ☁️
-Scans every 10 minutes.
+You'll receive instant alerts for large contracts!
             """
             self.bot.reply_to(message, text, parse_mode='Markdown')
         
@@ -336,56 +334,51 @@ Scans every 10 minutes.
             status = "🟢 Running" if self.is_running else "🔴 Stopped"
             text = f"""
 *Status:* {status}
-*Scan Interval:* 10 minutes
-*Notified Contracts:* {len(self.notified)}
+*Interval:* 10 minutes
+*Notified:* {len(self.notified)} contracts
 *Threshold:* €15,000,000
-*Logic:* Full 3-step processing ✔
+*Platform:* Replit (Free)
+*Uptime:* 24/7
             """
             self.bot.reply_to(message, text, parse_mode='Markdown')
         
         @self.bot.message_handler(commands=['scan'])
         def run_scan(message):
-            self.bot.reply_to(message, "🔍 Starting full 3-step scan...\n1️⃣ Fetching contracts\n2️⃣ Converting currencies\n3️⃣ Filtering high-value results")
+            self.bot.reply_to(message, "🔍 Scanning TED...")
             count = self._scan()
             if count == 0:
-                self.bot.reply_to(message, "✅ Scan complete. No new high-value contracts found.")
+                self.bot.reply_to(message, "✅ No new contracts found")
             else:
-                self.bot.reply_to(message, f"✅ Found {count} new high-value contracts!")
+                self.bot.reply_to(message, f"✅ Found {count} new contracts!")
         
         @self.bot.message_handler(commands=['stop'])
         def stop(message):
             self.is_running = False
-            self.bot.reply_to(message, "⏸️ Auto-scan stopped. Use /resume to restart.")
+            self.bot.reply_to(message, "⏸️ Stopped. Use /resume to restart")
         
         @self.bot.message_handler(commands=['resume'])
         def resume(message):
             if not self.is_running:
                 self.is_running = True
                 Thread(target=self._monitoring_loop, daemon=True).start()
-                self.bot.reply_to(message, "▶️ Auto-scan resumed!")
+                self.bot.reply_to(message, "▶️ Resumed!")
             else:
-                self.bot.reply_to(message, "ℹ️ Already running.")
+                self.bot.reply_to(message, "Already running")
     
     def _scan(self) -> int:
-        """Run full 3-step scan"""
+        """Run 3-step scan"""
         try:
             logger.info("="*60)
-            logger.info("STARTING 3-STEP TED SCAN")
+            logger.info("STARTING TED SCAN")
             logger.info("="*60)
             
-            # STEP 1: Fetch all contracts
-            logger.info("STEP 1: FETCHING ALL CONTRACTS")
             notices = self.collector.fetch_all_contracts(days_back=1)
-            
             if not notices:
                 logger.info("No contracts found")
                 return 0
             
-            # STEP 2 & 3: Convert currencies and filter (combined in filter_high_value_results)
-            logger.info("STEP 2: CONVERTING CURRENCIES TO EUR")
             high_value_contracts = self.collector.filter_high_value_results(notices)
             
-            # Send notifications for new contracts
             new_count = 0
             for contract in high_value_contracts:
                 pub_num = str(contract["publication_number"])
@@ -397,19 +390,18 @@ Scans every 10 minutes.
                 self.notified.add(pub_num)
                 new_count += 1
             
-            logger.info(f"SCAN COMPLETE: {new_count} new contracts notified")
+            logger.info(f"COMPLETE: {new_count} new alerts sent")
             logger.info("="*60)
             return new_count
             
         except Exception as e:
             logger.error(f"Scan error: {e}", exc_info=True)
-            self._send(f"❌ Scan error: {str(e)}")
+            self._send(f"❌ Error: {str(e)[:100]}")
             return 0
     
     def _notify(self, contract: dict):
-        """Send detailed notification about contract"""
+        """Send contract notification"""
         try:
-            # Build lots information
             lots_text = ""
             for lot in contract["lots"]:
                 lots_text += f"\n*Lot:* {lot['lot_id']}\n"
@@ -419,33 +411,31 @@ Scans every 10 minutes.
                 if lot['tender_currency'] == 'EUR':
                     lots_text += f"  Value: €{lot['eur_value']:,.0f}\n"
                 else:
-                    lots_text += f"  Value: €{lot['eur_value']:,.0f} (converted from {lot['tender_value']:,.0f} {lot['tender_currency']})\n"
+                    lots_text += f"  Value: €{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})\n"
             
-            # Truncate title if too long
             title = str(contract['title'])
             if len(title) > 150:
                 title = title[:150] + "..."
             
             msg = f"""
-🚨 *HIGH-VALUE CONTRACT FOUND!* 🚨
+🚨 *HIGH-VALUE CONTRACT!* 🚨
 
-*Publication Number:* {contract['publication_number']}
-*Publication Date:* {contract['publication_date']}
-*Form Type:* {contract['form_type']}
+*Publication:* {contract['publication_number']}
+*Date:* {contract['publication_date']}
+*Form:* {contract['form_type']}
 
 *TOTAL VALUE: €{contract['total_eur']:,.0f}*
 
-*Buyer Information:*
-• Name: {contract['buyer_name']}
-• Country: {contract['buyer_country']}
-• City: {contract['buyer_city']}
+*Buyer:*
+• {contract['buyer_name']}
+• {contract['buyer_country']}, {contract['buyer_city']}
 
-*Contract Title:*
+*Title:*
 {title}
 
-*Lots & Winners:*{lots_text}
+*Lots:*{lots_text}
 
-🔗 [View Full Contract]({contract['url']})
+🔗 [View Contract]({contract['url']})
 
 _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
             """
@@ -456,7 +446,7 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
             logger.error(f"Notify error: {e}")
     
     def _send(self, message: str):
-        """Send message to Telegram"""
+        """Send Telegram message"""
         try:
             self.bot.send_message(
                 self.chat_id, 
@@ -467,65 +457,73 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
         except Exception as e:
             logger.error(f"Send error: {e}")
             try:
-                # Fallback without markdown
                 self.bot.send_message(self.chat_id, message)
             except:
                 pass
     
     def _monitoring_loop(self):
         """Auto-scan every 10 minutes"""
-        logger.info("Monitoring loop started")
-        self._send("✅ *TED Monitoring Started!*\n\nFull 3-step scanning:\n1️⃣ Fetch contracts\n2️⃣ Convert to EUR\n3️⃣ Filter ≥€15M\n\nScanning every 10 minutes.")
+        logger.info("Monitoring started")
+        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€15M.")
         
         while self.is_running:
             try:
                 self._scan()
                 
                 if self.is_running:
-                    logger.info("Waiting 10 minutes until next scan...")
-                    time.sleep(600)  # 10 minutes
+                    logger.info("Waiting 10 minutes...")
+                    time.sleep(600)
                     
             except Exception as e:
                 logger.error(f"Loop error: {e}", exc_info=True)
                 time.sleep(600)
     
     def start(self):
-        """Start the bot"""
-        logger.info("Starting Telegram bot with full Scan.py logic...")
+        """Start bot"""
+        logger.info("Starting bot...")
         
         # Auto-start monitoring
         self.is_running = True
         Thread(target=self._monitoring_loop, daemon=True).start()
         
-        logger.info("Bot running. Polling for messages...")
-        self.bot.infinity_polling()
+        logger.info("Bot running. Polling...")
+        self.bot.infinity_polling(timeout=60, long_polling_timeout=60)
 
 
 def main():
-    """Main entry point - WITH FALLBACK TO HARDCODED VALUES"""
+    """Main entry point"""
     
-    # Try to read from environment variables first, fallback to hardcoded
+    # Credentials
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw')
     CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '2133274440')
     TED_KEY = os.environ.get('TED_API_KEY', '0f0d8c2f68bb46bab7afa51c46053433')
     
-    # Log which source we're using
-    if os.environ.get('TELEGRAM_BOT_TOKEN'):
-        logger.info("Using credentials from environment variables ✓")
-    else:
-        logger.warning("Using hardcoded credentials (set environment variables for better security)")
+    logger.info("="*60)
+    logger.info("TED TELEGRAM BOT - REPLIT 24/7")
+    logger.info("="*60)
+    logger.info(f"Chat ID: {CHAT_ID}")
+    logger.info(f"Platform: Replit Free Tier")
+    logger.info(f"Mode: 24/7 with Flask keepalive")
+    logger.info("="*60)
     
-    logger.info(f"Starting TED Bot for chat: {CHAT_ID}")
-    logger.info(f"Bot token: {BOT_TOKEN[:20]}... (truncated)")
-    logger.info(f"TED API key: {TED_KEY[:10]}... (truncated)")
+    # Start Flask web server in background
+    Thread(target=run_flask, daemon=True).start()
+    logger.info("Flask web server started on port 8080")
     
-    bot = TEDTelegramBot(
-        bot_token=BOT_TOKEN,
-        chat_id=CHAT_ID,
-        ted_api_key=TED_KEY
-    )
-    
-    bot.start()
+    try:
+        bot = TEDTelegramBot(
+            bot_token=BOT_TOKEN,
+            chat_id=CHAT_ID,
+            ted_api_key=TED_KEY
+        )
+        
+        bot.start()
+        
+    except KeyboardInterrupt:
+        logger.info("\nBot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
