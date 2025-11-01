@@ -57,47 +57,63 @@ class StockLookup:
         # Check cache
         cache_key = company_name.lower()
         if cache_key in self.cache:
+            self.logger.info(f"Cache hit for {company_name}: {self.cache[cache_key]}")
             return self.cache[cache_key]
         
+        self.logger.info(f"Looking up ticker for: {company_name} (Country: {country})")
+        
         try:
-            # Clean company name
-            clean_name = company_name.upper().strip()
+            # Clean company name - remove common suffixes first
+            clean_name = company_name.strip()
             
-            # Common company suffixes to try
-            suffixes = ['', ' AB', ' AS', ' OYJ', ' SPA', ' SA', ' AG', ' PLC', ' LTD', ' INC', ' CORP']
+            # Remove common legal suffixes
+            remove_suffixes = [' AB', ' AS', ' OYJ', ' SPA', ' S.P.A.', ' SA', ' S.A.', 
+                              ' AG', ' A.G.', ' PLC', ' LTD', ' LIMITED', ' INC', 
+                              ' INCORPORATED', ' CORP', ' CORPORATION', ' NV', ' BV',
+                              ' GMBH', ' SE', ' ASA', ' OY']
             
-            # Try exact search first
-            for suffix in suffixes:
-                search_term = clean_name + suffix
-                try:
-                    ticker = self.yf.Ticker(search_term)
-                    info = ticker.info
-                    if info and info.get('symbol'):
-                        self.cache[cache_key] = info['symbol']
-                        return info['symbol']
-                except:
-                    continue
+            for suffix in remove_suffixes:
+                if clean_name.upper().endswith(suffix):
+                    clean_name = clean_name[:-len(suffix)].strip()
+                    break
             
-            # If no exact match, search common exchanges based on country
+            self.logger.info(f"Cleaned name: {clean_name}")
+            
+            # Get exchanges to search
             exchanges = self._get_exchanges_for_country(country)
+            self.logger.info(f"Searching exchanges: {exchanges}")
             
+            # Try each exchange
             for exchange in exchanges:
-                search_term = f"{clean_name}.{exchange}"
+                if exchange:
+                    search_term = f"{clean_name}.{exchange}"
+                else:
+                    search_term = clean_name
+                
+                self.logger.info(f"Trying: {search_term}")
+                
                 try:
                     ticker = self.yf.Ticker(search_term)
+                    # Force fetch to validate ticker exists
                     info = ticker.info
-                    if info and info.get('symbol'):
-                        self.cache[cache_key] = info['symbol']
-                        return info['symbol']
-                except:
+                    
+                    # Check if we got valid data
+                    if info and len(info) > 1 and info.get('symbol'):
+                        symbol = info['symbol']
+                        self.logger.info(f"✓ Found ticker: {symbol}")
+                        self.cache[cache_key] = symbol
+                        return symbol
+                except Exception as e:
+                    self.logger.debug(f"Failed {search_term}: {e}")
                     continue
             
             # Cache negative result
+            self.logger.info(f"✗ No ticker found for {company_name}")
             self.cache[cache_key] = None
             return None
             
         except Exception as e:
-            self.logger.debug(f"Ticker lookup failed for {company_name}: {e}")
+            self.logger.error(f"Ticker lookup error for {company_name}: {e}")
             return None
     
     def _get_exchanges_for_country(self, country: str) -> List[str]:
@@ -348,13 +364,22 @@ class TEDDataCollector:
         """Filter for result contracts >= 15M EUR"""
         self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
         self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
+        self.logger.info(f"Total notices to filter: {len(notices)}")
 
         high_value_contracts = []
+        
+        # Debug counters
+        result_count = 0
+        has_value_count = 0
 
         for notice in notices:
             try:
                 form_type = notice.get("form-type", "")
-                if not form_type or 'result' not in str(form_type).lower():
+                
+                # Count result types
+                if form_type and 'result' in str(form_type).lower():
+                    result_count += 1
+                else:
                     continue
 
                 lots = self.match_winners_to_lots(notice)
@@ -385,6 +410,10 @@ class TEDDataCollector:
                         except (ValueError, TypeError):
                             continue
 
+                if total_eur > 0:
+                    has_value_count += 1
+                    self.logger.info(f"Result contract: {notice.get('publication-number')} - €{total_eur:,.0f}")
+
                 if total_eur >= min_value_eur:
                     high_value_contracts.append({
                         "publication_number": notice.get("publication-number", "N/A"),
@@ -399,13 +428,15 @@ class TEDDataCollector:
                         "lots": converted_lots
                     })
 
-                    self.logger.info(f"Found: {notice.get('publication-number')} - €{total_eur:,.0f}")
+                    self.logger.info(f"✓ HIGH VALUE: {notice.get('publication-number')} - €{total_eur:,.0f}")
 
             except Exception as e:
                 self.logger.warning(f"Error processing: {e}")
                 continue
 
-        self.logger.info(f"Found {len(high_value_contracts)} high-value contracts")
+        self.logger.info(f"Debug: Found {result_count} result-type contracts")
+        self.logger.info(f"Debug: Found {has_value_count} with tender values")
+        self.logger.info(f"Found {len(high_value_contracts)} high-value contracts (>= €{min_value_eur:,.0f})")
         return high_value_contracts
 
 
@@ -471,6 +502,26 @@ You'll receive instant alerts for large contracts!
                 self.bot.reply_to(message, "✅ No new contracts found")
             else:
                 self.bot.reply_to(message, f"✅ Found {count} new contracts!")
+        
+        @self.bot.message_handler(commands=['test'])
+        def test_scan(message):
+            """Test with lower threshold to see what's available"""
+            self.bot.reply_to(message, "🔍 Testing with €5M threshold...")
+            try:
+                notices = self.collector.fetch_all_contracts(days_back=7)
+                if not notices:
+                    self.bot.reply_to(message, "No contracts fetched")
+                    return
+                
+                # Test with 5M threshold
+                test_contracts = self.collector.filter_high_value_results(notices, min_value_eur=5_000_000)
+                
+                if test_contracts:
+                    self.bot.reply_to(message, f"Found {len(test_contracts)} contracts >= €5M")
+                else:
+                    self.bot.reply_to(message, "No contracts found even at €5M")
+            except Exception as e:
+                self.bot.reply_to(message, f"Error: {str(e)[:100]}")
 
         @self.bot.message_handler(commands=['stop'])
         def stop(message):
@@ -492,7 +543,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=2)
+            notices = self.collector.fetch_all_contracts(days_back=7)
             if not notices:
                 logger.info("No contracts found")
                 return 0
