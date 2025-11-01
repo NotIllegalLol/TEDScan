@@ -504,16 +504,9 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
 def main():
     """Main entry point"""
     
-    BOT_TOKEN = os.environ.get('8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw')
-    CHAT_ID = os.environ.get('2133274440')
-    TED_KEY = os.environ.get('0f0d8c2f68bb46bab7afa51c46053433')
-    
-    if not BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN not set!")
-    if not CHAT_ID:
-        raise ValueError("TELEGRAM_CHAT_ID not set!")
-    if not TED_KEY:
-        raise ValueError("TED_API_KEY not set!")
+    BOT_TOKEN = '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw'
+    CHAT_ID = '2133274440'
+    TED_KEY = '0f0d8c2f68bb46bab7afa51c46053433'
     
     logger.info(f"Starting TED Bot with full 3-step logic for chat: {CHAT_ID}")
     
