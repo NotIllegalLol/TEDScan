@@ -508,7 +508,7 @@ You'll receive instant alerts for large contracts!
             """Test with lower threshold to see what's available"""
             self.bot.reply_to(message, "🔍 Testing with €5M threshold...")
             try:
-                notices = self.collector.fetch_all_contracts(days_back=7)
+                notices = self.collector.fetch_all_contracts(days_back=2)
                 if not notices:
                     self.bot.reply_to(message, "No contracts fetched")
                     return
