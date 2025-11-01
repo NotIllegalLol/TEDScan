@@ -502,29 +502,22 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
 
 
 def main():
-    """Main entry point - FIXED FOR RENDER.COM"""
+    """Main entry point - WITH FALLBACK TO HARDCODED VALUES"""
     
-    # Read from environment variables (Render.com format)
-    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-    TED_KEY = os.environ.get('TED_API_KEY')
+    # Try to read from environment variables first, fallback to hardcoded
+    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw')
+    CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '2133274440')
+    TED_KEY = os.environ.get('TED_API_KEY', '0f0d8c2f68bb46bab7afa51c46053433')
     
-    # Validate required environment variables
-    if not BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not set in environment variables!")
-        logger.error("Set it in Render.com Dashboard -> Environment Variables")
-        raise ValueError("TELEGRAM_BOT_TOKEN not set!")
-    
-    if not CHAT_ID:
-        logger.error("TELEGRAM_CHAT_ID not set in environment variables!")
-        logger.error("Set it in Render.com Dashboard -> Environment Variables")
-        raise ValueError("TELEGRAM_CHAT_ID not set!")
-    
-    if not TED_KEY:
-        logger.warning("TED_API_KEY not set - will try without API key")
-        TED_KEY = None
+    # Log which source we're using
+    if os.environ.get('TELEGRAM_BOT_TOKEN'):
+        logger.info("Using credentials from environment variables ✓")
+    else:
+        logger.warning("Using hardcoded credentials (set environment variables for better security)")
     
     logger.info(f"Starting TED Bot for chat: {CHAT_ID}")
+    logger.info(f"Bot token: {BOT_TOKEN[:20]}... (truncated)")
+    logger.info(f"TED API key: {TED_KEY[:10]}... (truncated)")
     
     bot = TEDTelegramBot(
         bot_token=BOT_TOKEN,
