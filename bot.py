@@ -1,6 +1,7 @@
 """
 TED Telegram Bot - Render.com Web Service Version
 Uses webhooks + Flask to stay alive 24/7 on free tier
+With stock ticker lookup for winners
 """
 
 import os
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta
 from threading import Thread
 import telebot
 import requests
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from flask import Flask, request
 
 # Setup logging
@@ -27,6 +28,130 @@ logger = logging.getLogger(__name__)
 
 # Flask app for webhooks
 app = Flask(__name__)
+
+
+class StockLookup:
+    """Lookup stock tickers and prices for companies"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        try:
+            import yfinance as yf
+            from fuzzywuzzy import fuzz
+            self.yf = yf
+            self.fuzz = fuzz
+            self.enabled = True
+            self.logger.info("✓ Stock lookup enabled (yfinance + fuzzywuzzy)")
+        except ImportError:
+            self.enabled = False
+            self.logger.warning("⚠ Stock lookup disabled - install yfinance and fuzzywuzzy")
+        
+        # Cache to avoid repeated lookups
+        self.cache = {}
+    
+    def find_ticker(self, company_name: str, country: str = None) -> Optional[str]:
+        """Find stock ticker using fuzzy matching"""
+        if not self.enabled or not company_name or company_name == "N/A":
+            return None
+        
+        # Check cache
+        cache_key = company_name.lower()
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        try:
+            # Clean company name
+            clean_name = company_name.upper().strip()
+            
+            # Common company suffixes to try
+            suffixes = ['', ' AB', ' AS', ' OYJ', ' SPA', ' SA', ' AG', ' PLC', ' LTD', ' INC', ' CORP']
+            
+            # Try exact search first
+            for suffix in suffixes:
+                search_term = clean_name + suffix
+                try:
+                    ticker = self.yf.Ticker(search_term)
+                    info = ticker.info
+                    if info and info.get('symbol'):
+                        self.cache[cache_key] = info['symbol']
+                        return info['symbol']
+                except:
+                    continue
+            
+            # If no exact match, search common exchanges based on country
+            exchanges = self._get_exchanges_for_country(country)
+            
+            for exchange in exchanges:
+                search_term = f"{clean_name}.{exchange}"
+                try:
+                    ticker = self.yf.Ticker(search_term)
+                    info = ticker.info
+                    if info and info.get('symbol'):
+                        self.cache[cache_key] = info['symbol']
+                        return info['symbol']
+                except:
+                    continue
+            
+            # Cache negative result
+            self.cache[cache_key] = None
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Ticker lookup failed for {company_name}: {e}")
+            return None
+    
+    def _get_exchanges_for_country(self, country: str) -> List[str]:
+        """Get likely stock exchanges for a country"""
+        if not country:
+            return ['', 'US', 'L', 'PA']
+        
+        country = country.upper()
+        exchange_map = {
+            'SE': ['ST'],  # Sweden
+            'FI': ['HE'],  # Finland
+            'NO': ['OL'],  # Norway
+            'DK': ['CO'],  # Denmark
+            'DE': ['DE', 'F'],  # Germany
+            'FR': ['PA'],  # France
+            'GB': ['L'],   # UK
+            'IT': ['MI'],  # Italy
+            'ES': ['MC'],  # Spain
+            'NL': ['AS'],  # Netherlands
+            'CH': ['SW'],  # Switzerland
+            'US': [''],    # US (no suffix)
+        }
+        
+        return exchange_map.get(country, ['', 'US', 'L'])
+    
+    def get_stock_info(self, ticker: str) -> Optional[Dict]:
+        """Get stock price and 5-day performance"""
+        if not self.enabled or not ticker:
+            return None
+        
+        try:
+            stock = self.yf.Ticker(ticker)
+            hist = stock.history(period='5d')
+            
+            if hist.empty:
+                return None
+            
+            current_price = hist['Close'].iloc[-1]
+            price_5d_ago = hist['Close'].iloc[0]
+            change_pct = ((current_price - price_5d_ago) / price_5d_ago) * 100
+            
+            info = stock.info
+            currency = info.get('currency', 'USD')
+            
+            return {
+                'ticker': ticker,
+                'price': current_price,
+                'change_5d': change_pct,
+                'currency': currency
+            }
+            
+        except Exception as e:
+            self.logger.debug(f"Failed to get stock info for {ticker}: {e}")
+            return None
 
 
 class TEDDataCollector:
@@ -57,7 +182,7 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 1) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 7) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
@@ -285,12 +410,13 @@ class TEDDataCollector:
 
 
 class TEDTelegramBot:
-    """Telegram bot with webhook support"""
+    """Telegram bot with webhook support and stock lookup"""
 
     def __init__(self, bot_token: str, chat_id: str, ted_api_key: str):
         self.bot = telebot.TeleBot(bot_token)
         self.chat_id = chat_id
         self.collector = TEDDataCollector(api_key=ted_api_key)
+        self.stock_lookup = StockLookup()
         self.is_running = False
         self.notified = set()
 
@@ -316,7 +442,8 @@ Running 24/7 on Render.com!
 ✅ Scans every 10 minutes
 ✅ Form type: result
 ✅ Min value: €15,000,000
-✅ Auto currency conversion
+✅ Stock ticker lookup
+✅ 5-day price change
 
 You'll receive instant alerts for large contracts!
             """
@@ -325,13 +452,14 @@ You'll receive instant alerts for large contracts!
         @self.bot.message_handler(commands=['status'])
         def send_status(message):
             status = "🟢 Running" if self.is_running else "🔴 Stopped"
+            stock_status = "✅ Enabled" if self.stock_lookup.enabled else "❌ Disabled"
             text = f"""
 *Status:* {status}
 *Interval:* 10 minutes
 *Notified:* {len(self.notified)} contracts
 *Threshold:* €15,000,000
+*Stock Lookup:* {stock_status}
 *Platform:* Render.com
-*Uptime:* 24/7 (webhook mode)
             """
             self.bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -364,7 +492,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=2)
+            notices = self.collector.fetch_all_contracts(days_back=7)
             if not notices:
                 logger.info("No contracts found")
                 return 0
@@ -392,44 +520,51 @@ You'll receive instant alerts for large contracts!
             return 0
 
     def _notify(self, contract: dict):
-        """Send contract notification"""
+        """Send trimmed contract notification with stock info"""
         try:
+            # Build lots section with stock info
             lots_text = ""
             for lot in contract["lots"]:
-                lots_text += f"\n*Lot:* {lot['lot_id']}\n"
-                lots_text += f"  Winner: {lot['winner_name']}\n"
-                lots_text += f"  Country: {lot['winner_country']}\n"
-
+                winner_name = lot['winner_name']
+                winner_country = lot['winner_country']
+                
+                # Format value
                 if lot['tender_currency'] == 'EUR':
-                    lots_text += f"  Value: €{lot['eur_value']:,.0f}\n"
+                    value_text = f"€{lot['eur_value']:,.0f}"
                 else:
-                    lots_text += f"  Value: €{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})\n"
-
-            title = str(contract['title'])
-            if len(title) > 150:
-                title = title[:150] + "..."
+                    value_text = f"€{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})"
+                
+                lots_text += f"\n*Lot {lot['lot_id']}* - {value_text}\n"
+                lots_text += f"Winner: {winner_name}\n"
+                
+                # Try to find stock ticker
+                ticker = self.stock_lookup.find_ticker(winner_name, winner_country)
+                if ticker:
+                    stock_info = self.stock_lookup.get_stock_info(ticker)
+                    if stock_info:
+                        change_emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
+                        lots_text += f"Stock: `{ticker}` {change_emoji}\n"
+                        lots_text += f"Price: {stock_info['price']:.2f} {stock_info['currency']}\n"
+                        lots_text += f"5d Change: {stock_info['change_5d']:+.2f}%\n"
+                    else:
+                        lots_text += f"Stock: `{ticker}` (no data)\n"
+                
+                lots_text += "\n"
 
             msg = f"""
-🚨 *HIGH-VALUE CONTRACT!* 🚨
+🚨 *HIGH-VALUE CONTRACT* 🚨
 
 *Publication:* {contract['publication_number']}
 *Date:* {contract['publication_date']}
 *Form:* {contract['form_type']}
 
-*TOTAL VALUE: €{contract['total_eur']:,.0f}*
+💰 *TOTAL VALUE: €{contract['total_eur']:,.0f}*
 
-*Buyer:*
-• {contract['buyer_name']}
-• {contract['buyer_country']}, {contract['buyer_city']}
+*Buyer:* {contract['buyer_name']}
+*Country:* {contract['buyer_country']}
 
-*Title:*
-{title}
-
-*Lots:*{lots_text}
-
+*LOTS:*{lots_text}
 🔗 [View Contract]({contract['url']})
-
-_Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
             """
 
             self._send(msg)
@@ -490,6 +625,7 @@ def home():
     <p>Status: Running on Render.com</p>
     <p>Mode: Webhook + Background Monitoring</p>
     <p>Scan Interval: 10 minutes</p>
+    <p>Features: Stock ticker lookup + 5-day performance</p>
     """, 200
 
 
@@ -527,7 +663,7 @@ def main():
     BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw')
     CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '2133274440')
     TED_KEY = os.environ.get('TED_API_KEY', '0f0d8c2f68bb46bab7afa51c46053433')
-    WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # Set this to your Render URL
+    WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 
     logger.info("="*60)
     logger.info("TED TELEGRAM BOT - RENDER.COM WEBHOOK MODE")
