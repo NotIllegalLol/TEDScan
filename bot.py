@@ -1,6 +1,6 @@
 """
-TED Telegram Bot - Complete Version with Full Scan.py Logic
-Includes all 3-step processing: Fetch, Convert, Filter
+TED Telegram Bot - Render.com Compatible Version
+Complete 3-step processing: Fetch, Convert, Filter
 """
 
 import os
@@ -98,7 +98,7 @@ class TEDDataCollector:
                 response = requests.post(self.search_api_url, json=request_body, headers=headers, timeout=30)
                 
                 if response.status_code != 200:
-                    self.logger.error(f"API returned status {response.status_code}")
+                    self.logger.error(f"API returned status {response.status_code}: {response.text}")
                     break
                 
                 data = response.json()
@@ -339,7 +339,7 @@ Scans every 10 minutes.
 *Scan Interval:* 10 minutes
 *Notified Contracts:* {len(self.notified)}
 *Threshold:* €15,000,000
-*Logic:* Full 3-step processing ✓
+*Logic:* Full 3-step processing ✔
             """
             self.bot.reply_to(message, text, parse_mode='Markdown')
         
@@ -502,13 +502,29 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
 
 
 def main():
-    """Main entry point"""
+    """Main entry point - FIXED FOR RENDER.COM"""
     
-    BOT_TOKEN = '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw'
-    CHAT_ID = '2133274440'
-    TED_KEY = '0f0d8c2f68bb46bab7afa51c46053433'
+    # Read from environment variables (Render.com format)
+    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    TED_KEY = os.environ.get('TED_API_KEY')
     
-    logger.info(f"Starting TED Bot with full 3-step logic for chat: {CHAT_ID}")
+    # Validate required environment variables
+    if not BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN not set in environment variables!")
+        logger.error("Set it in Render.com Dashboard -> Environment Variables")
+        raise ValueError("TELEGRAM_BOT_TOKEN not set!")
+    
+    if not CHAT_ID:
+        logger.error("TELEGRAM_CHAT_ID not set in environment variables!")
+        logger.error("Set it in Render.com Dashboard -> Environment Variables")
+        raise ValueError("TELEGRAM_CHAT_ID not set!")
+    
+    if not TED_KEY:
+        logger.warning("TED_API_KEY not set - will try without API key")
+        TED_KEY = None
+    
+    logger.info(f"Starting TED Bot for chat: {CHAT_ID}")
     
     bot = TEDTelegramBot(
         bot_token=BOT_TOKEN,
