@@ -37,14 +37,14 @@ class StockLookup:
         self.logger = logging.getLogger(__name__)
         try:
             import yfinance as yf
-            from fuzzywuzzy import fuzz
+            from rapidfuzz import fuzz
             self.yf = yf
             self.fuzz = fuzz
             self.enabled = True
-            self.logger.info("✓ Stock lookup enabled (yfinance + fuzzywuzzy)")
+            self.logger.info("✓ Stock lookup enabled (yfinance + rapidfuzz)")
         except ImportError:
             self.enabled = False
-            self.logger.warning("⚠ Stock lookup disabled - install yfinance and fuzzywuzzy")
+            self.logger.warning("⚠ Stock lookup disabled - install yfinance and rapidfuzz")
         
         # Cache to avoid repeated lookups
         self.cache = {}
