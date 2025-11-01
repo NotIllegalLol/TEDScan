@@ -364,7 +364,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=1)
+            notices = self.collector.fetch_all_contracts(days_back=2)
             if not notices:
                 logger.info("No contracts found")
                 return 0
