@@ -1,6 +1,7 @@
 """
 TED Telegram Bot - Render.com Web Service Version
 Uses webhooks + Flask to stay alive 24/7 on free tier
+With Yahoo Finance stock ticker lookup
 """
 
 import os
@@ -11,8 +12,9 @@ from datetime import datetime, timedelta
 from threading import Thread
 import telebot
 import requests
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from flask import Flask, request
+import yfinance as yf
 
 # Setup logging
 logging.basicConfig(
