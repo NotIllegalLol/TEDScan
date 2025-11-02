@@ -144,11 +144,14 @@ class StockLookup:
         if not self.enabled or not ticker:
             return None
         
+        self.logger.info(f"Fetching stock info for: {ticker}")
+        
         try:
             stock = self.yf.Ticker(ticker)
             hist = stock.history(period='5d')
             
-            if hist.empty:
+            if hist.empty or len(hist) < 2:
+                self.logger.warning(f"No history data for {ticker}")
                 return None
             
             current_price = hist['Close'].iloc[-1]
@@ -158,6 +161,8 @@ class StockLookup:
             info = stock.info
             currency = info.get('currency', 'USD')
             
+            self.logger.info(f"✓ Stock data: {ticker} @ {current_price:.2f} {currency} ({change_pct:+.2f}%)")
+            
             return {
                 'ticker': ticker,
                 'price': current_price,
@@ -166,7 +171,7 @@ class StockLookup:
             }
             
         except Exception as e:
-            self.logger.debug(f"Failed to get stock info for {ticker}: {e}")
+            self.logger.error(f"Failed to get stock info for {ticker}: {e}")
             return None
 
 
@@ -198,7 +203,7 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 2) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 3) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
@@ -508,7 +513,7 @@ You'll receive instant alerts for large contracts!
             """Test with lower threshold to see what's available"""
             self.bot.reply_to(message, "🔍 Testing with €5M threshold...")
             try:
-                notices = self.collector.fetch_all_contracts(days_back=2)
+                notices = self.collector.fetch_all_contracts(days_back=3)
                 if not notices:
                     self.bot.reply_to(message, "No contracts fetched")
                     return
@@ -522,6 +527,37 @@ You'll receive instant alerts for large contracts!
                     self.bot.reply_to(message, "No contracts found even at €5M")
             except Exception as e:
                 self.bot.reply_to(message, f"Error: {str(e)[:100]}")
+        
+        @self.bot.message_handler(commands=['stock'])
+        def lookup_stock(message):
+            """Lookup stock: /stock Company Name"""
+            try:
+                # Extract company name from command
+                parts = message.text.split(maxsplit=1)
+                if len(parts) < 2:
+                    self.bot.reply_to(message, "Usage: /stock Company Name\nExample: /stock Skanska AB")
+                    return
+                
+                company_name = parts[1]
+                self.bot.reply_to(message, f"🔍 Looking up: {company_name}...")
+                
+                ticker = self.stock_lookup.find_ticker(company_name)
+                if ticker:
+                    stock_info = self.stock_lookup.get_stock_info(ticker)
+                    if stock_info:
+                        change_emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
+                        msg = f"""
+✓ Found: `{ticker}` {change_emoji}
+Price: {stock_info['price']:.2f} {stock_info['currency']}
+5d Change: {stock_info['change_5d']:+.2f}%
+                        """
+                        self.bot.reply_to(message, msg, parse_mode='Markdown')
+                    else:
+                        self.bot.reply_to(message, f"Found ticker `{ticker}` but no stock data", parse_mode='Markdown')
+                else:
+                    self.bot.reply_to(message, f"✗ No ticker found for: {company_name}")
+            except Exception as e:
+                self.bot.reply_to(message, f"Error: {str(e)}")
 
         @self.bot.message_handler(commands=['stop'])
         def stop(message):
@@ -543,7 +579,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=7)
+            notices = self.collector.fetch_all_contracts(days_back=2)
             if not notices:
                 logger.info("No contracts found")
                 return 0
@@ -589,16 +625,23 @@ You'll receive instant alerts for large contracts!
                 lots_text += f"Winner: {winner_name}\n"
                 
                 # Try to find stock ticker
+                logger.info(f"Looking up stock for: {winner_name} ({winner_country})")
                 ticker = self.stock_lookup.find_ticker(winner_name, winner_country)
+                
                 if ticker:
+                    logger.info(f"Found ticker: {ticker}, fetching stock info...")
                     stock_info = self.stock_lookup.get_stock_info(ticker)
                     if stock_info:
                         change_emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
                         lots_text += f"Stock: `{ticker}` {change_emoji}\n"
                         lots_text += f"Price: {stock_info['price']:.2f} {stock_info['currency']}\n"
                         lots_text += f"5d Change: {stock_info['change_5d']:+.2f}%\n"
+                        logger.info(f"✓ Added stock info for {ticker}")
                     else:
                         lots_text += f"Stock: `{ticker}` (no data)\n"
+                        logger.warning(f"Ticker found but no stock data: {ticker}")
+                else:
+                    logger.info(f"No ticker found for {winner_name}")
                 
                 lots_text += "\n"
 
@@ -621,7 +664,7 @@ You'll receive instant alerts for large contracts!
             self._send(msg)
 
         except Exception as e:
-            logger.error(f"Notify error: {e}")
+            logger.error(f"Notify error: {e}", exc_info=True)
 
     def _send(self, message: str):
         """Send Telegram message"""
