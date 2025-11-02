@@ -203,7 +203,7 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 3) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 7) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
@@ -513,7 +513,7 @@ You'll receive instant alerts for large contracts!
             """Test with lower threshold to see what's available"""
             self.bot.reply_to(message, "🔍 Testing with €5M threshold...")
             try:
-                notices = self.collector.fetch_all_contracts(days_back=3)
+                notices = self.collector.fetch_all_contracts(days_back=7)
                 if not notices:
                     self.bot.reply_to(message, "No contracts fetched")
                     return
