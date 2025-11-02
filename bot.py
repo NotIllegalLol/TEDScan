@@ -1,245 +1,133 @@
 """
-TED Telegram Bot - Render.com Web Service Version
-Uses webhooks + Flask to stay alive 24/7 on free tier
-With stock ticker lookup for winners
+TED Contract Data Collector - With Currency Conversion and Filtering
+Collects contracts, converts to EUR, and filters high-value results
 """
 
-import os
-import sys
-import time
+import requests
+import json
 import logging
 from datetime import datetime, timedelta
-from threading import Thread
-import telebot
-import requests
-from typing import List, Dict, Tuple, Optional
-from flask import Flask, request
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Flask app for webhooks
-app = Flask(__name__)
-
-
-class StockLookup:
-    """Lookup stock tickers and prices for companies"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        try:
-            import yfinance as yf
-            from rapidfuzz import fuzz
-            self.yf = yf
-            self.fuzz = fuzz
-            self.enabled = True
-            self.logger.info("✓ Stock lookup enabled (yfinance + rapidfuzz)")
-        except ImportError:
-            self.enabled = False
-            self.logger.warning("⚠ Stock lookup disabled - install yfinance and rapidfuzz")
-
-        # Cache to avoid repeated lookups
-        self.cache = {}
-
-    def find_ticker(self, company_name: str, country: str = None) -> Optional[str]:
-        """Find stock ticker using fuzzy matching"""
-        if not self.enabled or not company_name or company_name == "N/A":
-            return None
-
-        # Check cache
-        cache_key = company_name.lower()
-        if cache_key in self.cache:
-            self.logger.info(f"Cache hit for {company_name}: {self.cache[cache_key]}")
-            return self.cache[cache_key]
-
-        self.logger.info(f"Looking up ticker for: {company_name} (Country: {country})")
-        
-        try:
-            # Clean company name
-            clean_name = company_name.upper().strip()
-            # Clean company name - remove common suffixes first
-            clean_name = company_name.strip()
-
-            # Common company suffixes to try
-            suffixes = ['', ' AB', ' AS', ' OYJ', ' SPA', ' SA', ' AG', ' PLC', ' LTD', ' INC', ' CORP']
-            # Remove common legal suffixes
-            remove_suffixes = [' AB', ' AS', ' OYJ', ' SPA', ' S.P.A.', ' SA', ' S.A.', 
-                              ' AG', ' A.G.', ' PLC', ' LTD', ' LIMITED', ' INC', 
-                              ' INCORPORATED', ' CORP', ' CORPORATION', ' NV', ' BV',
-                              ' GMBH', ' SE', ' ASA', ' OY']
-
-            # Try exact search first
-            for suffix in suffixes:
-                search_term = clean_name + suffix
-                try:
-                    ticker = self.yf.Ticker(search_term)
-                    info = ticker.info
-                    if info and info.get('symbol'):
-                        self.cache[cache_key] = info['symbol']
-                        return info['symbol']
-                except:
-                    continue
-            for suffix in remove_suffixes:
-                if clean_name.upper().endswith(suffix):
-                    clean_name = clean_name[:-len(suffix)].strip()
-                    break
-            
-            self.logger.info(f"Cleaned name: {clean_name}")
-
-            # If no exact match, search common exchanges based on country
-            # Get exchanges to search
-            exchanges = self._get_exchanges_for_country(country)
-            self.logger.info(f"Searching exchanges: {exchanges}")
-
-            # Try each exchange
-            for exchange in exchanges:
-                search_term = f"{clean_name}.{exchange}"
-                if exchange:
-                    search_term = f"{clean_name}.{exchange}"
-                else:
-                    search_term = clean_name
-                
-                self.logger.info(f"Trying: {search_term}")
-                
-                try:
-                    ticker = self.yf.Ticker(search_term)
-                    # Force fetch to validate ticker exists
-                    info = ticker.info
-                    if info and info.get('symbol'):
-                        self.cache[cache_key] = info['symbol']
-                        return info['symbol']
-                except:
-                    
-                    # Check if we got valid data
-                    if info and len(info) > 1 and info.get('symbol'):
-                        symbol = info['symbol']
-                        self.logger.info(f"✓ Found ticker: {symbol}")
-                        self.cache[cache_key] = symbol
-                        return symbol
-                except Exception as e:
-                    self.logger.debug(f"Failed {search_term}: {e}")
-                    continue
-
-            # Cache negative result
-            self.logger.info(f"✗ No ticker found for {company_name}")
-            self.cache[cache_key] = None
-            return None
-
-        except Exception as e:
-            self.logger.debug(f"Ticker lookup failed for {company_name}: {e}")
-            self.logger.error(f"Ticker lookup error for {company_name}: {e}")
-            return None
-
-    def _get_exchanges_for_country(self, country: str) -> List[str]:
-        """Get likely stock exchanges for a country"""
-        if not country:
-            return ['', 'US', 'L', 'PA']
-
-        country = country.upper()
-        exchange_map = {
-            'SE': ['ST'],  # Sweden
-            'FI': ['HE'],  # Finland
-            'NO': ['OL'],  # Norway
-            'DK': ['CO'],  # Denmark
-            'DE': ['DE', 'F'],  # Germany
-            'FR': ['PA'],  # France
-            'GB': ['L'],   # UK
-            'IT': ['MI'],  # Italy
-            'ES': ['MC'],  # Spain
-            'NL': ['AS'],  # Netherlands
-            'CH': ['SW'],  # Switzerland
-            'US': [''],    # US (no suffix)
-        }
-
-        return exchange_map.get(country, ['', 'US', 'L'])
-
-    def get_stock_info(self, ticker: str) -> Optional[Dict]:
-        """Get stock price and 5-day performance"""
-        if not self.enabled or not ticker:
-            return None
-
-        try:
-            stock = self.yf.Ticker(ticker)
-            hist = stock.history(period='5d')
-
-            if hist.empty:
-                return None
-
-            current_price = hist['Close'].iloc[-1]
-            price_5d_ago = hist['Close'].iloc[0]
-            change_pct = ((current_price - price_5d_ago) / price_5d_ago) * 100
-
-            info = stock.info
-            currency = info.get('currency', 'USD')
-
-            return {
-                'ticker': ticker,
-                'price': current_price,
-                'change_5d': change_pct,
-                'currency': currency
-            }
-
-        except Exception as e:
-            self.logger.debug(f"Failed to get stock info for {ticker}: {e}")
-            return None
-
+import time
+from typing import List, Dict, Any, Tuple
+from pathlib import Path
+import re
+import shutil
 
 class TEDDataCollector:
-    """Complete TED collector with 3-step logic"""
-
-    def __init__(self, api_key: str = None):
+    """Collect and save all TED contracts using official Search API v3"""
+    
+    def __init__(self, api_key: str = None, output_dir: str = r"E:\Anaconda3\envs\ted\Scripts\Results"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # API key for authentication
         self.api_key = api_key
-        self.search_api_url = "https://api.ted.europa.eu/v3/notices/search"
+        
+        # Setup logging
+        log_file = self.output_dir / f"ted_collector_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
         self.logger = logging.getLogger(__name__)
-
-        # Exchange rates (Nov 2024)
-        self.fallback_rates = {
-            'USD': 0.92, 'GBP': 1.17, 'CHF': 1.06,
+        
+        # Official TED Search API v3 endpoint
+        self.search_api_url = "https://api.ted.europa.eu/v3/notices/search"
+        
+        # Initialize currency converter
+        try:
+            from forex_python.converter import CurrencyRates
+            self.currency_converter = CurrencyRates()
+            self.logger.info("✓ Currency converter initialized (forex-python)")
+        except:
+            try:
+                from currency_converter import CurrencyConverter
+                self.currency_converter = CurrencyConverter()
+                self.logger.info("✓ Currency converter initialized (CurrencyConverter)")
+            except:
+                self.currency_converter = None
+                self.logger.warning("⚠ No currency converter available - will use fallback rates")
+        
+        self.logger.info("✓ TED Data Collector initialized")
+        self.logger.info(f"✓ Using Official TED Search API v3")
+        self.logger.info(f"✓ Saving to: {self.output_dir}")
+        self.logger.info(f"✓ Log file: {log_file}")
+    
+    def convert_to_eur(self, amount: float, currency: str) -> float:
+        """
+        Convert amount to EUR with fallback rates
+        
+        Args:
+            amount: Amount to convert
+            currency: Currency code (e.g., 'SEK', 'USD', 'GBP')
+            
+        Returns:
+            Amount in EUR
+        """
+        if currency == "EUR" or not currency:
+            return amount
+        
+        # Fallback exchange rates (approximate, updated Nov 2024)
+        fallback_rates = {
+            'USD': 0.92, 'GBP': 1.17, 'CHF': 1.06, 
             'SEK': 0.088, 'DKK': 0.134, 'NOK': 0.086,
             'PLN': 0.23, 'CZK': 0.040, 'HUF': 0.0025,
             'RON': 0.20, 'BGN': 0.51, 'HRK': 0.13,
             'ISK': 0.0066, 'TRY': 0.027, 'RUB': 0.010
         }
-
-    def convert_to_eur(self, amount: float, currency: str) -> float:
-        """Convert amount to EUR"""
-        if currency == "EUR" or not currency:
-            return amount
-
-        if currency in self.fallback_rates:
-            return amount * self.fallback_rates[currency]
-
-        self.logger.warning(f"Unknown currency: {currency}")
+        
+        # Try using live rates first
+        if self.currency_converter:
+            try:
+                if hasattr(self.currency_converter, 'get_rate'):
+                    # forex_python style
+                    rate = self.currency_converter.get_rate(currency, 'EUR')
+                    return amount * rate
+                elif hasattr(self.currency_converter, 'convert'):
+                    # CurrencyConverter style
+                    return self.currency_converter.convert(amount, currency, 'EUR')
+            except Exception as e:
+                self.logger.debug(f"Live conversion failed for {currency}: {e}")
+        
+        # Use fallback rates
+        if currency in fallback_rates:
+            return amount * fallback_rates[currency]
+        
+        # If unknown currency, log warning and return original
+        self.logger.warning(f"Unknown currency: {currency}, cannot convert")
         return amount
-
-    def fetch_all_contracts(self, days_back: int = 7) -> List[Dict]:
-        """Fetch contracts from TED API"""
+    
+    def fetch_all_contracts(self, days_back: int = 1, specific_date: str = None) -> List[Dict]:
+        """Fetch all contracts from TED Search API"""
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_back)
-            start_str = start_date.strftime("%Y%m%d")
-            end_str = end_date.strftime("%Y%m%d")
-
-            self.logger.info(f"Fetching contracts from {start_str} to {end_str}")
-
+            if specific_date:
+                specific_date = specific_date.replace("-", "")
+                start_str = specific_date
+                end_str = specific_date
+                self.logger.info(f"\n→ Fetching contracts for specific date: {specific_date}...")
+            else:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days_back)
+                start_str = start_date.strftime("%Y%m%d")
+                end_str = end_date.strftime("%Y%m%d")
+                self.logger.info(f"\n→ Fetching contracts from {start_str} to {end_str}...")
+            
             all_notices = []
             page = 1
             limit = 50
-            max_pages = 10
-
-            while page <= max_pages:
-                self.logger.info(f"Fetching page {page}...")
-
-                query = f"PD={start_str}" if start_str == end_str else f"PD>={start_str} AND PD<={end_str}"
-
+            
+            while True:
+                self.logger.info(f"  → Fetching page {page}...")
+                
+                if start_str == end_str:
+                    query = f"PD={start_str}"
+                else:
+                    query = f"PD>={start_str} AND PD<={end_str}"
+                
                 request_body = {
                     "query": query,
                     "fields": [
@@ -255,63 +143,55 @@ class TEDDataCollector:
                     "scope": "ALL",
                     "paginationMode": "PAGE_NUMBER"
                 }
-
+                
                 headers = {
                     "Content-Type": "application/json",
                     "Accept": "application/json"
                 }
-
+                
                 if self.api_key:
                     headers["apikey"] = self.api_key
-
-                try:
-                    response = requests.post(
-                        self.search_api_url,
-                        json=request_body,
-                        headers=headers,
-                        timeout=30
-                    )
-
-                    if response.status_code != 200:
-                        self.logger.error(f"API status {response.status_code}")
-                        break
-
-                    data = response.json()
-                    notices = data.get("notices", [])
-                    total = data.get("total", 0)
-
-                    if not notices:
-                        break
-
-                    all_notices.extend(notices)
-                    self.logger.info(f"Got {len(notices)} notices (total: {len(all_notices)}/{total})")
-
-                    if len(all_notices) >= total or len(notices) < limit:
-                        break
-
-                    page += 1
-                    time.sleep(0.5)
-
-                except requests.exceptions.RequestException as e:
-                    self.logger.error(f"Request error: {e}")
+                
+                response = requests.post(self.search_api_url, json=request_body, headers=headers, timeout=30)
+                
+                if response.status_code != 200:
+                    self.logger.error(f"⚠ API returned status {response.status_code}")
                     break
-
-            self.logger.info(f"Total fetched: {len(all_notices)}")
+                
+                data = response.json()
+                notices = data.get("notices", [])
+                total = data.get("total", 0)
+                
+                if not notices:
+                    break
+                
+                all_notices.extend(notices)
+                self.logger.info(f"  ✓ Got {len(notices)} notices (total: {len(all_notices)}/{total})")
+                
+                if len(all_notices) >= total or len(notices) < limit:
+                    break
+                
+                page += 1
+                time.sleep(0.5)
+            
+            self.logger.info(f"✓ Total contracts fetched: {len(all_notices)}")
             return all_notices
-
+            
         except Exception as e:
-            self.logger.error(f"Fetch error: {e}", exc_info=True)
+            self.logger.error(f"⚠ Error fetching TED data: {e}", exc_info=True)
             return []
-
+    
     def match_winners_to_lots(self, notice: Dict) -> List[Tuple[Dict, str, str]]:
-        """Match winners to lots"""
+        """Match winners to lots with currency info"""
         lots = []
-
+        
         def to_list(data):
             if data is None:
                 return []
-            return data if isinstance(data, list) else [data]
-
+            if isinstance(data, list):
+                return data
+            return [data]
+        
         def extract_from_dict(data):
             if data is None:
                 return None
@@ -323,11 +203,11 @@ class TEDDataCollector:
                 first_val = next(iter(data.values())) if data else None
                 return first_val[0] if isinstance(first_val, list) else first_val
             return data
-
+        
         lot_ids = to_list(notice.get("identifier-lot"))
         lot_estimated_values = to_list(notice.get("estimated-value-lot"))
         lot_estimated_currencies = to_list(notice.get("estimated-value-cur-lot"))
-
+        
         winner_names_raw = notice.get("winner-name")
         winner_names = []
         if isinstance(winner_names_raw, dict):
@@ -335,9 +215,9 @@ class TEDDataCollector:
             winner_names = to_list(winner_name_val)
         else:
             winner_names = to_list(winner_names_raw)
-
+        
         winner_countries = to_list(notice.get("winner-country"))
-
+        
         winner_cities_raw = notice.get("winner-city")
         winner_cities = []
         if isinstance(winner_cities_raw, dict):
@@ -345,436 +225,451 @@ class TEDDataCollector:
             winner_cities = to_list(winner_city_val)
         else:
             winner_cities = to_list(winner_cities_raw)
-
+        
         tender_values = to_list(notice.get("tender-value"))
         tender_currencies = to_list(notice.get("tender-value-cur"))
-
+        
         num_lots = max(len(lot_ids), len(lot_estimated_values), len(tender_values), 1)
-
+        
         for i in range(num_lots):
             lot_data = {
                 "lot_id": lot_ids[i] if i < len(lot_ids) else f"LOT-{i+1}",
                 "estimated_value": lot_estimated_values[i] if i < len(lot_estimated_values) else None,
                 "tender_value": tender_values[i] if i < len(tender_values) else None,
             }
-
-            est_currency = (lot_estimated_currencies[0] if len(lot_estimated_currencies) == 1
-                           else lot_estimated_currencies[i] if i < len(lot_estimated_currencies)
-                           else "EUR")
-
-            tender_currency = (tender_currencies[0] if len(tender_currencies) == 1
-                              else tender_currencies[i] if i < len(tender_currencies)
-                              else "EUR")
-
-            lot_data["winner_name"] = (winner_names[i] if len(winner_names) == num_lots and i < len(winner_names)
-                                      else winner_names[0] if len(winner_names) == 1
-                                      else "N/A")
-
-            lot_data["winner_country"] = (winner_countries[i] if len(winner_countries) == num_lots and i < len(winner_countries)
-                                         else winner_countries[0] if len(winner_countries) == 1
-                                         else "N/A")
-
-            lot_data["winner_city"] = (winner_cities[i] if len(winner_cities) == num_lots and i < len(winner_cities)
-                                      else winner_cities[0] if len(winner_cities) == 1
-                                      else "N/A")
-
+            
+            if len(lot_estimated_currencies) == 1:
+                est_currency = lot_estimated_currencies[0]
+            elif i < len(lot_estimated_currencies):
+                est_currency = lot_estimated_currencies[i]
+            else:
+                est_currency = "EUR"
+            
+            if len(tender_currencies) == 1:
+                tender_currency = tender_currencies[0]
+            elif i < len(tender_currencies):
+                tender_currency = tender_currencies[i]
+            else:
+                tender_currency = "EUR"
+            
+            if len(winner_names) == num_lots:
+                lot_data["winner_name"] = winner_names[i] if i < len(winner_names) else "N/A"
+            elif len(winner_names) == 1:
+                lot_data["winner_name"] = winner_names[0]
+            else:
+                lot_data["winner_name"] = "N/A"
+            
+            if len(winner_countries) == num_lots:
+                lot_data["winner_country"] = winner_countries[i] if i < len(winner_countries) else "N/A"
+            elif len(winner_countries) == 1:
+                lot_data["winner_country"] = winner_countries[0]
+            else:
+                lot_data["winner_country"] = "N/A"
+            
+            if len(winner_cities) == num_lots:
+                lot_data["winner_city"] = winner_cities[i] if i < len(winner_cities) else "N/A"
+            elif len(winner_cities) == 1:
+                lot_data["winner_city"] = winner_cities[0]
+            else:
+                lot_data["winner_city"] = "N/A"
+            
             lots.append((lot_data, est_currency, tender_currency))
-
+        
         return lots
-
-    def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 15_000_000) -> List[Dict]:
-        """Filter for result contracts >= 15M EUR"""
-        self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
-        self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
-        self.logger.info(f"Total notices to filter: {len(notices)}")
-
-        high_value_contracts = []
-        
-        # Debug counters
-        result_count = 0
-        has_value_count = 0
-
-        for notice in notices:
-            try:
-                form_type = notice.get("form-type", "")
-                if not form_type or 'result' not in str(form_type).lower():
-                
-                # Count result types
-                if form_type and 'result' in str(form_type).lower():
-                    result_count += 1
-                else:
-                    continue
-
-                lots = self.match_winners_to_lots(notice)
-                if not lots:
-                    continue
-
-                total_eur = 0
-                converted_lots = []
-
-                for lot_data, est_currency, tender_currency in lots:
-                    tender_value = lot_data.get('tender_value')
-
-                    if tender_value is not None:
-                        try:
-                            tender_float = float(tender_value)
-                            eur_value = self.convert_to_eur(tender_float, tender_currency)
-                            total_eur += eur_value
-
-                            converted_lots.append({
-                                "lot_id": lot_data['lot_id'],
-                                "winner_name": lot_data['winner_name'],
-                                "winner_country": lot_data['winner_country'],
-                                "winner_city": lot_data['winner_city'],
-                                "tender_value": tender_float,
-                                "tender_currency": tender_currency,
-                                "eur_value": eur_value
-                            })
-                        except (ValueError, TypeError):
-                            continue
-
-                if total_eur > 0:
-                    has_value_count += 1
-                    self.logger.info(f"Result contract: {notice.get('publication-number')} - €{total_eur:,.0f}")
-
-                if total_eur >= min_value_eur:
-                    high_value_contracts.append({
-                        "publication_number": notice.get("publication-number", "N/A"),
-                        "publication_date": notice.get("publication-date", "N/A"),
-                        "form_type": form_type,
-                        "buyer_name": notice.get("buyer-name", "N/A"),
-                        "buyer_country": notice.get("buyer-country", "N/A"),
-                        "buyer_city": notice.get("buyer-city", "N/A"),
-                        "title": notice.get("notice-title", "N/A"),
-                        "url": notice.get("announcement-url", "N/A"),
-                        "total_eur": total_eur,
-                        "lots": converted_lots
-                    })
-
-                    self.logger.info(f"Found: {notice.get('publication-number')} - €{total_eur:,.0f}")
-                    self.logger.info(f"✓ HIGH VALUE: {notice.get('publication-number')} - €{total_eur:,.0f}")
-
-            except Exception as e:
-                self.logger.warning(f"Error processing: {e}")
-                continue
-
-        self.logger.info(f"Found {len(high_value_contracts)} high-value contracts")
-        self.logger.info(f"Debug: Found {result_count} result-type contracts")
-        self.logger.info(f"Debug: Found {has_value_count} with tender values")
-        self.logger.info(f"Found {len(high_value_contracts)} high-value contracts (>= €{min_value_eur:,.0f})")
-        return high_value_contracts
-
-
-class TEDTelegramBot:
-    """Telegram bot with webhook support and stock lookup"""
-
-    def __init__(self, bot_token: str, chat_id: str, ted_api_key: str):
-        self.bot = telebot.TeleBot(bot_token)
-        self.chat_id = chat_id
-        self.collector = TEDDataCollector(api_key=ted_api_key)
-        self.stock_lookup = StockLookup()
-        self.is_running = False
-        self.notified = set()
-
-        self._setup_handlers()
-
-    def _setup_handlers(self):
-
-        @self.bot.message_handler(commands=['start', 'help'])
-        def send_welcome(message):
-            text = """
-🤖 *TED Contract Monitor Bot*
-
-Running 24/7 on Render.com!
-
-*Commands:*
-/start - Show this message
-/status - Bot status
-/scan - Scan now
-/stop - Stop auto-scan
-/resume - Resume auto-scan
-
-*Monitoring:*
-✅ Scans every 10 minutes
-✅ Form type: result
-✅ Min value: €15,000,000
-✅ Stock ticker lookup
-✅ 5-day price change
-
-You'll receive instant alerts for large contracts!
-            """
-            self.bot.reply_to(message, text, parse_mode='Markdown')
-
-        @self.bot.message_handler(commands=['status'])
-        def send_status(message):
-            status = "🟢 Running" if self.is_running else "🔴 Stopped"
-            stock_status = "✅ Enabled" if self.stock_lookup.enabled else "❌ Disabled"
-            text = f"""
-*Status:* {status}
-*Interval:* 10 minutes
-*Notified:* {len(self.notified)} contracts
-*Threshold:* €15,000,000
-*Stock Lookup:* {stock_status}
-*Platform:* Render.com
-            """
-            self.bot.reply_to(message, text, parse_mode='Markdown')
-
-        @self.bot.message_handler(commands=['scan'])
-        def run_scan(message):
-            self.bot.reply_to(message, "🔍 Scanning TED...")
-            count = self._scan()
-            if count == 0:
-                self.bot.reply_to(message, "✅ No new contracts found")
-            else:
-                self.bot.reply_to(message, f"✅ Found {count} new contracts!")
-        
-        @self.bot.message_handler(commands=['test'])
-        def test_scan(message):
-            """Test with lower threshold to see what's available"""
-            self.bot.reply_to(message, "🔍 Testing with €5M threshold...")
-            try:
-                notices = self.collector.fetch_all_contracts(days_back=7)
-                if not notices:
-                    self.bot.reply_to(message, "No contracts fetched")
-                    return
-                
-                # Test with 5M threshold
-                test_contracts = self.collector.filter_high_value_results(notices, min_value_eur=5_000_000)
-                
-                if test_contracts:
-                    self.bot.reply_to(message, f"Found {len(test_contracts)} contracts >= €5M")
-                else:
-                    self.bot.reply_to(message, "No contracts found even at €5M")
-            except Exception as e:
-                self.bot.reply_to(message, f"Error: {str(e)[:100]}")
-
-        @self.bot.message_handler(commands=['stop'])
-        def stop(message):
-            self.is_running = False
-            self.bot.reply_to(message, "⏸️ Stopped. Use /resume to restart")
-
-        @self.bot.message_handler(commands=['resume'])
-        def resume(message):
-            if not self.is_running:
-                self.is_running = True
-                self.bot.reply_to(message, "▶️ Resumed!")
-            else:
-                self.bot.reply_to(message, "Already running")
-
-    def _scan(self) -> int:
-        """Run 3-step scan"""
+    
+    def save_contract(self, notice: Dict, index: int):
+        """Save individual contract to text file"""
         try:
-            logger.info("="*60)
-            logger.info("STARTING TED SCAN")
-            logger.info("="*60)
-
-            notices = self.collector.fetch_all_contracts(days_back=2)
-            notices = self.collector.fetch_all_contracts(days_back=7)
-            if not notices:
-                logger.info("No contracts found")
-                return 0
-
-            high_value_contracts = self.collector.filter_high_value_results(notices)
-
-            new_count = 0
-            for contract in high_value_contracts:
-                pub_num = str(contract["publication_number"])
-
-                if pub_num in self.notified:
-                    continue
-
-                self._notify(contract)
-                self.notified.add(pub_num)
-                new_count += 1
-
-            logger.info(f"COMPLETE: {new_count} new alerts sent")
-            logger.info("="*60)
-            return new_count
-
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            pub_number = notice.get("publication-number")
+            if pub_number:
+                if isinstance(pub_number, list) and pub_number:
+                    notice_id = pub_number[0]
+                else:
+                    notice_id = pub_number
+            else:
+                notice_id = f"unknown_{index}"
+            
+            notice_id = str(notice_id).replace("/", "_").replace("\\", "_")
+            filename = f"contract_{timestamp}_{index:04d}_{notice_id}.txt"
+            filepath = self.output_dir / filename
+            
+            content = self._format_contract(notice, index)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            return filepath
+            
         except Exception as e:
-            logger.error(f"Scan error: {e}", exc_info=True)
-            self._send(f"❌ Error: {str(e)[:100]}")
-            return 0
+            self.logger.error(f"⚠ Error saving contract {index}: {e}", exc_info=True)
+            return None
+    
+    def _format_contract(self, notice: Dict, index: int) -> str:
+        """Format contract data as readable text"""
+        separator = "=" * 80
+        
+        def extract_value(data, default="N/A"):
+            if data is None:
+                return default
+            if isinstance(data, list):
+                if not data:
+                    return default
+                return ", ".join(str(x) for x in data if x)
+            return str(data)
+        
+        pub_number = extract_value(notice.get("publication-number"))
+        pub_date = extract_value(notice.get("publication-date"))
+        notice_type = extract_value(notice.get("notice-type"))
+        form_type = extract_value(notice.get("form-type"))
+        buyer_name = extract_value(notice.get("buyer-name"))
+        buyer_country = extract_value(notice.get("buyer-country"))
+        buyer_city = extract_value(notice.get("buyer-city"))
+        title = extract_value(notice.get("notice-title"))
+        contract_nature = extract_value(notice.get("contract-nature"))
+        url = extract_value(notice.get("announcement-url"))
+        
+        lots = self.match_winners_to_lots(notice)
+        
+        lot_section = ""
+        if lots:
+            lot_section = f"""
+LOT INFORMATION:
+{"-" * 80}
+Total Lots: {len(lots)}
+"""
+            for i, (lot, est_cur, tender_cur) in enumerate(lots, 1):
+                est_val = lot.get('estimated_value', 'N/A')
+                tender_val = lot.get('tender_value', 'N/A')
+                
+                if est_val != 'N/A' and est_val is not None:
+                    try:
+                        est_val = f"{float(est_val):,.2f} {est_cur}"
+                    except:
+                        est_val = f"{est_val} {est_cur}"
+                
+                if tender_val != 'N/A' and tender_val is not None:
+                    try:
+                        tender_val = f"{float(tender_val):,.2f} {tender_cur}"
+                    except:
+                        tender_val = f"{tender_val} {tender_cur}"
+                
+                lot_section += f"""
+LOT #{i}: {lot['lot_id']}
+  
+  VALUES:
+    Estimated Value:  {est_val}
+    Tender Value:     {tender_val}
+  
+  WINNER/CONTRACTOR:
+    Name:             {lot['winner_name']}
+    Country:          {lot['winner_country']}
+    City:             {lot['winner_city']}
+"""
+        else:
+            lot_section = f"""
+LOT INFORMATION:
+{"-" * 80}
+No lot information available.
+"""
+        
+        content = f"""{separator}
+CONTRACT NOTICE #{index} - TED DATABASE
+{separator}
 
-    def _notify(self, contract: dict):
-        """Send trimmed contract notification with stock info"""
-        try:
-            # Build lots section with stock info
-            lots_text = ""
-            for lot in contract["lots"]:
-                winner_name = lot['winner_name']
-                winner_country = lot['winner_country']
+BASIC INFORMATION:
+{"-" * 80}
+Publication Number:      {pub_number}
+Publication Date:        {pub_date}
+Notice Type:             {notice_type}
+Form Type:               {form_type}
 
-                # Format value
-                if lot['tender_currency'] == 'EUR':
-                    value_text = f"€{lot['eur_value']:,.0f}"
-                else:
-                    value_text = f"€{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})"
+BUYER/CONTRACTING AUTHORITY:
+{"-" * 80}
+Buyer Name:              {buyer_name}
+Buyer Country:           {buyer_country}
+Buyer City:              {buyer_city}
 
-                lots_text += f"\n*Lot {lot['lot_id']}* - {value_text}\n"
-                lots_text += f"Winner: {winner_name}\n"
+CONTRACT DETAILS:
+{"-" * 80}
+Title:                   {title}
+Contract Nature:         {contract_nature}
+Notice URL:              {url}
+{lot_section}
+{separator}
+RAW JSON DATA:
+{separator}
+{json.dumps(notice, indent=2, ensure_ascii=False)}
 
-                # Try to find stock ticker
-                ticker = self.stock_lookup.find_ticker(winner_name, winner_country)
-                if ticker:
-                    stock_info = self.stock_lookup.get_stock_info(ticker)
-                    if stock_info:
-                        change_emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
-                        lots_text += f"Stock: `{ticker}` {change_emoji}\n"
-                        lots_text += f"Price: {stock_info['price']:.2f} {stock_info['currency']}\n"
-                        lots_text += f"5d Change: {stock_info['change_5d']:+.2f}%\n"
+{separator}
+"""
+        return content
+    
+    def analyze_and_convert_currencies(self):
+        """
+        Step 2: Analyze all saved contracts, convert Tender Values to EUR
+        """
+        self.logger.info("\n" + "="*80)
+        self.logger.info("💱 STEP 2: ANALYZING AND CONVERTING CURRENCIES")
+        self.logger.info("="*80)
+        
+        contract_files = list(self.output_dir.glob("contract_*.txt"))
+        self.logger.info(f"Found {len(contract_files)} contracts to analyze...")
+        
+        processed_count = 0
+        
+        for filepath in contract_files:
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Add EUR conversions to the file
+                updated_content = self._add_eur_conversions(content)
+                
+                # Save updated file
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+                
+                processed_count += 1
+                
+            except Exception as e:
+                self.logger.warning(f"Could not process {filepath.name}: {e}")
+        
+        self.logger.info(f"✓ Processed and updated {processed_count} contracts with EUR values")
+    
+    def _add_eur_conversions(self, content: str) -> str:
+        """Add EUR Value conversions to contract content"""
+        
+        # Find LOT INFORMATION section
+        lot_section_match = re.search(r'LOT INFORMATION:.*?(?=RAW JSON DATA|$)', content, re.DOTALL)
+        
+        if not lot_section_match:
+            return content
+        
+        lot_section = lot_section_match.group(0)
+        updated_lot_section = lot_section
+        
+        # Find all LOT blocks
+        lot_blocks = re.findall(r'(LOT #\d+:.*?)(?=LOT #|\Z)', lot_section, re.DOTALL)
+        
+        for lot_block in lot_blocks:
+            # Extract Tender Value with currency
+            tender_match = re.search(r'Tender Value:\s*([\d,]+\.?\d*)\s+([A-Z]{3})', lot_block)
+            
+            if tender_match:
+                value_str = tender_match.group(1).replace(',', '')
+                currency = tender_match.group(2)
+                
+                try:
+                    value = float(value_str)
+                    
+                    # Convert to EUR
+                    if currency == "EUR":
+                        eur_value = value
+                        eur_line = f"    EUR Value:        {eur_value:,.2f} EUR (no conversion needed)"
                     else:
-                        lots_text += f"Stock: `{ticker}` (no data)\n"
-
-                lots_text += "\n"
-
-            msg = f"""
-🚨 *HIGH-VALUE CONTRACT* 🚨
-
-*Publication:* {contract['publication_number']}
-*Date:* {contract['publication_date']}
-*Form:* {contract['form_type']}
-
-💰 *TOTAL VALUE: €{contract['total_eur']:,.0f}*
-
-*Buyer:* {contract['buyer_name']}
-*Country:* {contract['buyer_country']}
-
-*LOTS:*{lots_text}
-🔗 [View Contract]({contract['url']})
-            """
-
-            self._send(msg)
-
-        except Exception as e:
-            logger.error(f"Notify error: {e}")
-
-    def _send(self, message: str):
-        """Send Telegram message"""
-        try:
-            self.bot.send_message(
-                self.chat_id,
-                message,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            logger.error(f"Send error: {e}")
+                        eur_value = self.convert_to_eur(value, currency)
+                        eur_line = f"    EUR Value:        {eur_value:,.2f} EUR (converted from {currency})"
+                    
+                    # Insert EUR Value line after Tender Value
+                    old_block = lot_block
+                    new_block = re.sub(
+                        r'(Tender Value:\s*[\d,]+\.?\d*\s+[A-Z]{3})',
+                        r'\1\n' + eur_line,
+                        lot_block
+                    )
+                    
+                    updated_lot_section = updated_lot_section.replace(old_block, new_block)
+                    
+                except ValueError:
+                    pass
+        
+        # Replace the old LOT section with updated one
+        updated_content = content.replace(lot_section, updated_lot_section)
+        
+        return updated_content
+    
+    def filter_high_value_results(self, min_value_eur: float = 15_000_000):
+        """
+        Step 3: Filter for Form Type: result AND EUR Value >= 15M
+        Create slim versions with only essential info
+        """
+        self.logger.info("\n" + "="*80)
+        self.logger.info("🔍 STEP 3: FILTERING HIGH-VALUE RESULTS")
+        self.logger.info("="*80)
+        self.logger.info(f"Filter criteria:")
+        self.logger.info(f"  • Form Type: must be 'result'")
+        self.logger.info(f"  • EUR Value: >= €{min_value_eur:,.0f}")
+        
+        # Create filtered folder
+        filtered_dir = self.output_dir / "high_value_results"
+        filtered_dir.mkdir(exist_ok=True)
+        
+        contract_files = list(self.output_dir.glob("contract_*.txt"))
+        high_value_count = 0
+        
+        for filepath in contract_files:
             try:
-                self.bot.send_message(self.chat_id, message)
-            except:
-                pass
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Check Form Type
+                form_type_match = re.search(r'Form Type:\s+(.+)', content)
+                if not form_type_match:
+                    continue
+                
+                form_type = form_type_match.group(1).strip()
+                
+                # Must be 'result'
+                if 'result' not in form_type.lower():
+                    continue
+                
+                # Extract all EUR Values from the contract
+                eur_values = re.findall(r'EUR Value:\s+([\d,]+\.?\d*)\s+EUR', content)
+                
+                if not eur_values:
+                    continue
+                
+                # Calculate total EUR value
+                total_eur = sum(float(val.replace(',', '')) for val in eur_values)
+                
+                # Check if meets threshold
+                if total_eur >= min_value_eur:
+                    # Extract essential information only
+                    pub_number = re.search(r'Publication Number:\s+(.+)', content)
+                    pub_date = re.search(r'Publication Date:\s+(.+)', content)
+                    
+                    pub_number_str = pub_number.group(1).strip() if pub_number else "N/A"
+                    pub_date_str = pub_date.group(1).strip() if pub_date else "N/A"
+                    
+                    # Extract LOT information with EUR Values and Winners
+                    lot_section = re.search(r'LOT INFORMATION:.*?(?=RAW JSON DATA|$)', content, re.DOTALL)
+                    
+                    slim_content = f"""{"="*80}
+*** HIGH VALUE RESULT CONTRACT ***
+*** TOTAL EUR VALUE: €{total_eur:,.2f} ***
+{"="*80}
 
-    def _monitoring_loop(self):
-        """Auto-scan every 10 minutes"""
-        logger.info("Monitoring started")
-        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€15M.")
+ESSENTIAL INFORMATION:
+--------------------------------------------------------------------------------
+Publication Number:      {pub_number_str}
+Publication Date:        {pub_date_str}
+Form Type:               {form_type}
 
-        while self.is_running:
-            try:
-                self._scan()
-
-                if self.is_running:
-                    logger.info("Waiting 10 minutes...")
-                    time.sleep(600)
-
+LOT VALUES (EUR):
+--------------------------------------------------------------------------------
+"""
+                    
+                    # Extract each lot with EUR value and winner
+                    if lot_section:
+                        # Find all lot blocks with their complete info
+                        lot_blocks = re.findall(
+                            r'(LOT #\d+: [^\n]+).*?EUR Value:\s+([\d,]+\.?\d*)\s+EUR.*?Name:\s+([^\n]+)',
+                            lot_section.group(0), 
+                            re.DOTALL
+                        )
+                        
+                        for lot_header, eur_val, winner_name in lot_blocks:
+                            winner_name = winner_name.strip()
+                            slim_content += f"{lot_header}\n"
+                            slim_content += f"  Winner: {winner_name}\n"
+                            slim_content += f"  EUR Value: €{eur_val}\n\n"
+                    
+                    slim_content += f"""{"="*80}
+TOTAL CONTRACT VALUE: €{total_eur:,.2f}
+{"="*80}
+"""
+                    
+                    # Save slim version
+                    dest_path = filtered_dir / filepath.name
+                    with open(dest_path, 'w', encoding='utf-8') as f:
+                        f.write(slim_content)
+                    
+                    high_value_count += 1
+                    self.logger.info(f"  ✓ {filepath.name}: €{total_eur:,.2f}")
+                    
             except Exception as e:
-                logger.error(f"Loop error: {e}", exc_info=True)
-                time.sleep(600)
-
-    def process_update(self, update):
-        """Process webhook update"""
-        try:
-            self.bot.process_new_updates([update])
-        except Exception as e:
-            logger.error(f"Update processing error: {e}")
-
-
-# Global bot instance
-bot_instance = None
-
-
-@app.route('/', methods=['GET'])
-def home():
-    """Home endpoint"""
-    return """
-    <h1>🤖 TED Contract Monitor</h1>
-    <p>Status: Running on Render.com</p>
-    <p>Mode: Webhook + Background Monitoring</p>
-    <p>Scan Interval: 10 minutes</p>
-    <p>Features: Stock ticker lookup + 5-day performance</p>
-    """, 200
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check for UptimeRobot"""
-    status = "running" if bot_instance and bot_instance.is_running else "stopped"
-    return {
-        'status': 'ok',
-        'monitoring': status,
-        'timestamp': datetime.now().isoformat()
-    }, 200
-
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Telegram webhook endpoint"""
-    if bot_instance:
-        try:
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
-            bot_instance.process_update(update)
-            return '', 200
-        except Exception as e:
-            logger.error(f"Webhook error: {e}")
-            return '', 500
-    return '', 404
+                self.logger.warning(f"Could not process {filepath.name}: {e}")
+        
+        self.logger.info(f"\n✓ Found {high_value_count} high-value result contracts")
+        self.logger.info(f"📁 Saved to: {filtered_dir}")
+        
+        return high_value_count
+    
+    def collect_and_save_all(self, days_back: int = 1, specific_date: str = None):
+        """Main collection process with 3-step filtering"""
+        
+        self.logger.info("\n" + "="*80)
+        self.logger.info("🔍 TED CONTRACT DATA COLLECTION - 3 STEP PROCESS")
+        self.logger.info("="*80)
+        if specific_date:
+            self.logger.info(f"📅 Specific Date: {specific_date}")
+        else:
+            self.logger.info(f"📅 Timeframe: Last {days_back} day(s)")
+        self.logger.info(f"💾 Output Directory: {self.output_dir}")
+        self.logger.info("="*80)
+        
+        # STEP 1: Fetch and save all contracts
+        self.logger.info("\n📥 STEP 1: FETCHING ALL CONTRACTS")
+        notices = self.fetch_all_contracts(days_back=days_back, specific_date=specific_date)
+        
+        if not notices:
+            self.logger.warning("\n❌ No contracts found!")
+            return
+        
+        self.logger.info(f"\n→ Saving all {len(notices)} contracts...")
+        saved_count = 0
+        for idx, notice in enumerate(notices, 1):
+            filepath = self.save_contract(notice, idx)
+            if filepath:
+                saved_count += 1
+                if saved_count % 50 == 0:
+                    self.logger.info(f"  ✓ Saved {saved_count}/{len(notices)}...")
+        
+        self.logger.info(f"✓ Saved {saved_count} contracts")
+        
+        # STEP 2: Convert all currencies to EUR
+        self.analyze_and_convert_currencies()
+        
+        # STEP 3: Filter for high-value results
+        high_value_count = self.filter_high_value_results(min_value_eur=15_000_000)
+        
+        # Final summary
+        self.logger.info("\n" + "="*80)
+        self.logger.info("✅ COLLECTION COMPLETE")
+        self.logger.info("="*80)
+        self.logger.info(f"📊 Total contracts fetched: {len(notices)}")
+        self.logger.info(f"📊 Contracts saved: {saved_count}")
+        self.logger.info(f"💰 High-value results (>€15M): {high_value_count}")
+        self.logger.info(f"📁 All contracts: {self.output_dir}")
+        self.logger.info(f"📁 High-value results: {self.output_dir / 'high_value_results'}")
+        self.logger.info("="*80)
 
 
 def main():
-    """Main entry point"""
-    global bot_instance
-
-    # Get credentials from environment
-    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8395744940:AAGmZVdj1l-QfZ4zqGP_9XOOvO9EbsnyWLw')
-    CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '2133274440')
-    TED_KEY = os.environ.get('TED_API_KEY', '0f0d8c2f68bb46bab7afa51c46053433')
-    WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-
-    logger.info("="*60)
-    logger.info("TED TELEGRAM BOT - RENDER.COM WEBHOOK MODE")
-    logger.info("="*60)
-    logger.info(f"Chat ID: {CHAT_ID}")
-    logger.info(f"Webhook: {WEBHOOK_URL}")
-    logger.info("="*60)
-
-    # Initialize bot
-    bot_instance = TEDTelegramBot(
-        bot_token=BOT_TOKEN,
-        chat_id=CHAT_ID,
-        ted_api_key=TED_KEY
+    """Main execution"""
+    
+    import os
+    api_key = os.environ.get('TED_API_KEY', '0f0d8c2f68bb46bab7afa51c46053433')
+    
+    collector = TEDDataCollector(
+        api_key=api_key,
+        output_dir=r"E:\Anaconda3\envs\ted\Scripts\Results"
     )
-
-    # Set webhook if URL provided
-    if WEBHOOK_URL:
-        try:
-            webhook_endpoint = f"{WEBHOOK_URL}/webhook"
-            bot_instance.bot.remove_webhook()
-            time.sleep(1)
-            bot_instance.bot.set_webhook(url=webhook_endpoint)
-            logger.info(f"Webhook set to: {webhook_endpoint}")
-        except Exception as e:
-            logger.error(f"Webhook setup failed: {e}")
-
-    # Start monitoring in background thread
-    bot_instance.is_running = True
-    Thread(target=bot_instance._monitoring_loop, daemon=True).start()
-
-    # Run Flask app
-    port = int(os.environ.get('PORT', 10000))
-    logger.info(f"Starting Flask on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    
+    try:
+        # 3-STEP PROCESS:
+        # 1. Fetch all contracts
+        # 2. Convert Tender Values to EUR (adds "EUR Value:" to each contract)
+        # 3. Filter for Form Type: result AND EUR Value >= €15M
+        
+        collector.collect_and_save_all(days_back=1)
+        
+    except KeyboardInterrupt:
+        collector.logger.info("\n\n✓ Collection stopped by user")
+    except Exception as e:
+        collector.logger.error(f"\n❌ Error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
