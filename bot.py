@@ -182,11 +182,11 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 7) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 4) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_back)
+            end_ = time.now()
+            start_ = end_ - timedelta(days=days_back)
             start_str = start_date.strftime("%Y%m%d")
             end_str = end_date.strftime("%Y%m%d")
 
@@ -492,7 +492,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=7)
+            notices = self.collector.fetch_all_contracts(days_back=4)
             if not notices:
                 logger.info("No contracts found")
                 return 0
