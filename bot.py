@@ -57,8 +57,8 @@ class TEDDataCollector:
         self.logger.warning(f"Unknown currency: {currency}")
         return amount
 
-    def fetch_all_contracts(self, days_back: int = 4) -> List[Dict]:
-        """Fetch contracts from TED API"""
+    def fetch_all_contracts(self, days_back: int = 5) -> List[Dict]:
+        """Fetch contracts from TED API and filter by publication date"""
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
@@ -133,8 +133,26 @@ class TEDDataCollector:
                     self.logger.error(f"Request error: {e}")
                     break
 
-            self.logger.info(f"Total fetched: {len(all_notices)}")
-            return all_notices
+            # Filter by actual publication-date field (last 2 days only)
+            cutoff_date = (datetime.now() - timedelta(days=2)).date()
+            filtered_notices = []
+            
+            for notice in all_notices:
+                pub_date_str = notice.get("publication-date")
+                if pub_date_str:
+                    try:
+                        # Parse "2025-11-03+01:00" format
+                        pub_date = datetime.strptime(pub_date_str.split('+')[0].split('-')[0:3].__str__().replace("['", "").replace("', '", "-").replace("']", ""), "%Y-%m-%d").date()
+                        if pub_date >= cutoff_date:
+                            filtered_notices.append(notice)
+                    except:
+                        # If parsing fails, include it anyway
+                        filtered_notices.append(notice)
+                else:
+                    filtered_notices.append(notice)
+
+            self.logger.info(f"Total fetched: {len(all_notices)}, after date filter (last 2 days): {len(filtered_notices)}")
+            return filtered_notices
 
         except Exception as e:
             self.logger.error(f"Fetch error: {e}", exc_info=True)
@@ -219,8 +237,8 @@ class TEDDataCollector:
 
         return lots
 
-    def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 10_000_000) -> List[Dict]:
-        """Filter for result contracts >= 10M EUR"""
+    def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 15_000_000) -> List[Dict]:
+        """Filter for result contracts >= 15M EUR"""
         self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
         self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
 
@@ -315,8 +333,9 @@ Running 24/7 on Render.com!
 *Monitoring:*
 ✅ Scans every 10 minutes
 ✅ Form type: result
-✅ Min value: €10,000,000
+✅ Min value: €15,000,000
 ✅ Auto currency conversion
+✅ Last 2 days only
 
 You'll receive instant alerts for large contracts!
             """
@@ -329,7 +348,8 @@ You'll receive instant alerts for large contracts!
 *Status:* {status}
 *Interval:* 10 minutes
 *Notified:* {len(self.notified)} contracts
-*Threshold:* €10,000,000
+*Threshold:* €15,000,000
+*Date Filter:* Last 2 days
 *Platform:* Render.com
 *Uptime:* 24/7 (webhook mode)
             """
@@ -364,7 +384,7 @@ You'll receive instant alerts for large contracts!
             logger.info("STARTING TED SCAN")
             logger.info("="*60)
 
-            notices = self.collector.fetch_all_contracts(days_back=4)
+            notices = self.collector.fetch_all_contracts(days_back=5)
             if not notices:
                 logger.info("No contracts found")
                 return 0
@@ -445,7 +465,7 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
     def _monitoring_loop(self):
         """Auto-scan every 10 minutes"""
         logger.info("Monitoring started")
-        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€10M.")
+        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€15M from last 2 days.")
 
         last_daily_check = datetime.now()
 
