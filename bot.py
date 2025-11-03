@@ -159,7 +159,7 @@ class TEDDataCollector:
             return amount
         return amount * self.rates.get(currency.upper(), 1.0)
 
-    def fetch_all_contracts(self, days_back: int = 4) -> List[Dict]:
+    def fetch_all_contracts(self, days_back: int = 2) -> List[Dict]:
         """Fetch contracts from TED API"""
         try:
             end_date = datetime.now()
@@ -472,7 +472,7 @@ class TEDTelegramBot:
         @self.bot.message_handler(commands=['scan'])
         def run_scan(message):
             self.bot.reply_to(message, "🔍 Scanning last 4 days...")
-            count = self._scan(days_back=4)
+            count = self._scan(days_back=2)
             self.bot.reply_to(message, f"✅ Scan complete! Sent {count} new alerts")
         
         @self.bot.message_handler(commands=['test'])
@@ -480,7 +480,7 @@ class TEDTelegramBot:
             """Test with €5M threshold"""
             self.bot.reply_to(message, "🧪 Testing with €5M threshold (4 days)...")
             try:
-                notices = self.collector.fetch_all_contracts(days_back=4)
+                notices = self.collector.fetch_all_contracts(days_back=2)
                 test_contracts = self.collector.filter_high_value_results(notices, min_value_eur=5_000_000)
                 
                 msg = f"Found {len(test_contracts)} contracts >= €5M\n\n"
@@ -530,7 +530,7 @@ class TEDTelegramBot:
             self.is_running = True
             self.bot.reply_to(message, "▶️ Resumed")
 
-    def _scan(self, days_back: int = 4) -> int:
+    def _scan(self, days_back: int = 2) -> int:
         """Run scan"""
         try:
             logger.info("="*60)
