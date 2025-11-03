@@ -286,128 +286,148 @@ class TEDDataCollector:
             self.logger.error(f"Fetch error: {e}", exc_info=True)
             return []
 
-    def match_winners_to_lots(self, notice: Dict) -> List[Tuple[Dict, str, str]]:
-        """Match winners to lots"""
+    def match_winners_to_lots(self, notice: Dict) -> List[Dict]:
+        """Match winners to lots with currency"""
         lots = []
 
         def to_list(data):
-            if data is None:
-                return []
-            return data if isinstance(data, list) else [data]
+            return [] if data is None else (data if isinstance(data, list) else [data])
 
         def extract_from_dict(data):
-            if data is None:
-                return None
-            if isinstance(data, dict):
-                for lang in ['eng', 'swe', 'deu', 'fra']:
-                    if lang in data and data[lang]:
-                        val = data[lang]
-                        return val[0] if isinstance(val, list) else val
-                first_val = next(iter(data.values())) if data else None
-                return first_val[0] if isinstance(first_val, list) else first_val
-            return data
+            if not isinstance(data, dict):
+                return data
+            for lang in ['eng', 'swe', 'deu', 'fra', 'spa']:
+                if lang in data and data[lang]:
+                    val = data[lang]
+                    return val[0] if isinstance(val, list) else val
+            first_val = next(iter(data.values())) if data else None
+            return first_val[0] if isinstance(first_val, list) else first_val
 
         lot_ids = to_list(notice.get("identifier-lot"))
-        lot_estimated_values = to_list(notice.get("estimated-value-lot"))
-        lot_estimated_currencies = to_list(notice.get("estimated-value-cur-lot"))
+        lot_est_values = to_list(notice.get("estimated-value-lot"))
+        lot_est_currencies = to_list(notice.get("estimated-value-cur-lot"))
 
         winner_names_raw = notice.get("winner-name")
-        winner_names = []
         if isinstance(winner_names_raw, dict):
-            winner_name_val = extract_from_dict(winner_names_raw)
-            winner_names = to_list(winner_name_val)
+            winner_names = to_list(extract_from_dict(winner_names_raw))
         else:
             winner_names = to_list(winner_names_raw)
 
         winner_countries = to_list(notice.get("winner-country"))
-
+        
         winner_cities_raw = notice.get("winner-city")
-        winner_cities = []
         if isinstance(winner_cities_raw, dict):
-            winner_city_val = extract_from_dict(winner_cities_raw)
-            winner_cities = to_list(winner_city_val)
+            winner_cities = to_list(extract_from_dict(winner_cities_raw))
         else:
             winner_cities = to_list(winner_cities_raw)
 
         tender_values = to_list(notice.get("tender-value"))
         tender_currencies = to_list(notice.get("tender-value-cur"))
 
-        num_lots = max(len(lot_ids), len(lot_estimated_values), len(tender_values), 1)
+        num_lots = max(len(lot_ids), len(tender_values), 1)
 
         for i in range(num_lots):
+            # Get currency
+            tender_cur = (tender_currencies[i] if i < len(tender_currencies) 
+                         else tender_currencies[0] if len(tender_currencies) == 1 
+                         else "EUR")
+            
+            est_cur = (lot_est_currencies[i] if i < len(lot_est_currencies)
+                      else lot_est_currencies[0] if len(lot_est_currencies) == 1
+                      else "EUR")
+
+            # Get winner
+            winner_name = (winner_names[i] if len(winner_names) == num_lots and i < len(winner_names)
+                          else winner_names[0] if len(winner_names) == 1
+                          else "N/A")
+            
+            winner_country = (winner_countries[i] if len(winner_countries) == num_lots and i < len(winner_countries)
+                             else winner_countries[0] if len(winner_countries) == 1
+                             else "N/A")
+            
+            winner_city = (winner_cities[i] if len(winner_cities) == num_lots and i < len(winner_cities)
+                          else winner_cities[0] if len(winner_cities) == 1
+                          else "N/A")
+
             lot_data = {
                 "lot_id": lot_ids[i] if i < len(lot_ids) else f"LOT-{i+1}",
-                "estimated_value": lot_estimated_values[i] if i < len(lot_estimated_values) else None,
+                "estimated_value": lot_est_values[i] if i < len(lot_est_values) else None,
+                "estimated_currency": est_cur,
                 "tender_value": tender_values[i] if i < len(tender_values) else None,
+                "tender_currency": tender_cur,
+                "winner_name": winner_name,
+                "winner_country": winner_country,
+                "winner_city": winner_city,
             }
-
-            est_currency = (lot_estimated_currencies[0] if len(lot_estimated_currencies) == 1
-                           else lot_estimated_currencies[i] if i < len(lot_estimated_currencies)
-                           else "EUR")
-
-            tender_currency = (tender_currencies[0] if len(tender_currencies) == 1
-                              else tender_currencies[i] if i < len(tender_currencies)
-                              else "EUR")
-
-            lot_data["winner_name"] = (winner_names[i] if len(winner_names) == num_lots and i < len(winner_names)
-                                      else winner_names[0] if len(winner_names) == 1
-                                      else "N/A")
-
-            lot_data["winner_country"] = (winner_countries[i] if len(winner_countries) == num_lots and i < len(winner_countries)
-                                         else winner_countries[0] if len(winner_countries) == 1
-                                         else "N/A")
-
-            lot_data["winner_city"] = (winner_cities[i] if len(winner_cities) == num_lots and i < len(winner_cities)
-                                      else winner_cities[0] if len(winner_cities) == 1
-                                      else "N/A")
-
-            lots.append((lot_data, est_currency, tender_currency))
+            lots.append(lot_data)
 
         return lots
 
     def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 15_000_000) -> List[Dict]:
-        """Filter for result contracts >= 15M EUR"""
-        self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
-        self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
-        self.logger.info(f"Total notices to filter: {len(notices)}")
+        """
+        STEP-BY-STEP FILTERING:
+        1. Get ALL contracts
+        2. Filter for form-type = "result" or "award"
+        3. Convert ALL currencies to EUR
+        4. Filter for total >= €15M
+        """
+        self.logger.info("="*60)
+        self.logger.info("FILTERING PROCESS")
+        self.logger.info("="*60)
+        self.logger.info(f"Step 1: Input contracts: {len(notices)}")
 
-        high_value_contracts = []
-        
-        # Debug counters
-        result_count = 0
-        has_value_count = 0
+        # Helper to extract from i18n dicts
+        def extract_from_dict(data):
+            if not isinstance(data, dict):
+                return data
+            for lang in ['eng', 'swe', 'deu', 'fra', 'spa', 'ita', 'nld', 'pol', 'ces', 'hun']:
+                if lang in data and data[lang]:
+                    val = data[lang]
+                    return val[0] if isinstance(val, list) else val
+            first = next(iter(data.values())) if data else None
+            return first[0] if isinstance(first, list) else first
 
+        # STEP 2: Filter for result/award type contracts
+        result_notices = []
         for notice in notices:
-            try:
-                form_type = notice.get("form-type", "")
-                
-                # Count result types
-                if form_type and 'result' in str(form_type).lower():
-                    result_count += 1
-                else:
-                    continue
+            form_type = notice.get("form-type", "")
+            form_type_lower = str(form_type).lower()
+            
+            # Include result, award, and CAN (Contract Award Notice) types
+            if "result" in form_type_lower or "award" in form_type_lower or "can" in form_type_lower:
+                result_notices.append(notice)
+                self.logger.debug(f"Including: {notice.get('publication-number')} with form-type: {form_type}")
+        
+        self.logger.info(f"Step 2: Result/Award contracts: {len(result_notices)}")
 
+        # STEP 3 & 4: Convert to EUR and filter for >= €15M
+        high_value = []
+        
+        for notice in result_notices:
+            try:
                 lots = self.match_winners_to_lots(notice)
                 if not lots:
                     continue
 
+                # Calculate total EUR value
                 total_eur = 0
                 converted_lots = []
 
-                for lot_data, est_currency, tender_currency in lots:
-                    tender_value = lot_data.get('tender_value')
-
-                    if tender_value is not None:
+                for lot in lots:
+                    tender_value = lot.get('tender_value')
+                    tender_currency = lot.get('tender_currency', 'EUR')
+                    
+                    if tender_value:
                         try:
                             tender_float = float(tender_value)
                             eur_value = self.convert_to_eur(tender_float, tender_currency)
                             total_eur += eur_value
 
                             converted_lots.append({
-                                "lot_id": lot_data['lot_id'],
-                                "winner_name": lot_data['winner_name'],
-                                "winner_country": lot_data['winner_country'],
-                                "winner_city": lot_data['winner_city'],
+                                "lot_id": lot['lot_id'],
+                                "winner_name": lot['winner_name'],
+                                "winner_country": lot['winner_country'],
+                                "winner_city": lot['winner_city'],
                                 "tender_value": tender_float,
                                 "tender_currency": tender_currency,
                                 "eur_value": eur_value
@@ -415,34 +435,57 @@ class TEDDataCollector:
                         except (ValueError, TypeError):
                             continue
 
+                # Log ALL result contracts with values (for debugging)
                 if total_eur > 0:
-                    has_value_count += 1
-                    self.logger.info(f"Result contract: {notice.get('publication-number')} - €{total_eur:,.0f}")
+                    self.logger.info(f"Contract {notice.get('publication-number')}: €{total_eur:,.0f}")
 
+                # Check if meets €15M threshold
                 if total_eur >= min_value_eur:
-                    high_value_contracts.append({
+                    # Extract URL from links object
+                    links = notice.get('links', {})
+                    html_links = links.get('html', {}) if isinstance(links, dict) else {}
+                    
+                    url = "N/A"
+                    for lang_code in ['ENG', 'SWE', 'DEU', 'FRA', 'SPA', 'ITA', 'NLD']:
+                        if lang_code in html_links:
+                            url = html_links[lang_code]
+                            break
+                    
+                    # Extract buyer info
+                    buyer_name = extract_from_dict(notice.get("buyer-name", "N/A"))
+                    
+                    buyer_country_raw = notice.get("buyer-country", "N/A")
+                    if isinstance(buyer_country_raw, list):
+                        buyer_country = buyer_country_raw[0] if buyer_country_raw else "N/A"
+                    else:
+                        buyer_country = buyer_country_raw
+                    
+                    buyer_city = extract_from_dict(notice.get("buyer-city", "N/A"))
+                    title = extract_from_dict(notice.get("notice-title", "N/A"))
+                    
+                    high_value.append({
                         "publication_number": notice.get("publication-number", "N/A"),
                         "publication_date": notice.get("publication-date", "N/A"),
                         "form_type": form_type,
-                        "buyer_name": notice.get("buyer-name", "N/A"),
-                        "buyer_country": notice.get("buyer-country", "N/A"),
-                        "buyer_city": notice.get("buyer-city", "N/A"),
-                        "title": notice.get("notice-title", "N/A"),
-                        "url": notice.get("announcement-url", "N/A"),
+                        "buyer_name": buyer_name,
+                        "buyer_country": buyer_country,
+                        "buyer_city": buyer_city,
+                        "title": title,
+                        "url": url,
                         "total_eur": total_eur,
                         "lots": converted_lots
                     })
 
-                    self.logger.info(f"✓ HIGH VALUE: {notice.get('publication-number')} - €{total_eur:,.0f}")
+                    self.logger.info(f"  ✅ HIGH-VALUE: {notice.get('publication-number')} = €{total_eur:,.0f}")
 
             except Exception as e:
-                self.logger.warning(f"Error processing: {e}")
+                self.logger.error(f"Processing error: {e}", exc_info=True)
                 continue
 
-        self.logger.info(f"Debug: Found {result_count} result-type contracts")
-        self.logger.info(f"Debug: Found {has_value_count} with tender values")
-        self.logger.info(f"Found {len(high_value_contracts)} high-value contracts (>= €{min_value_eur:,.0f})")
-        return high_value_contracts
+        self.logger.info(f"Step 4: High-value contracts (>= €{min_value_eur:,.0f}): {len(high_value)}")
+        self.logger.info("="*60)
+        
+        return high_value
 
 
 class TEDTelegramBot:
