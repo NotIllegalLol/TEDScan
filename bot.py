@@ -601,62 +601,96 @@ class TEDTelegramBot:
             return 0
 
     def _notify(self, contract: dict):
-        """Send notification"""
+        """Send notification - SHORTENED to avoid Telegram length limit"""
         try:
+            # Shorten title if too long
+            title = contract.get('title', 'N/A')
+            if isinstance(title, dict):
+                title = title.get('eng', title.get('swe', 'N/A'))
+            if isinstance(title, list):
+                title = title[0] if title else 'N/A'
+            title_short = str(title)[:80] + "..." if len(str(title)) > 80 else str(title)
+
+            # Shorten buyer name if too long
+            buyer_name = str(contract.get('buyer_name', 'N/A'))[:60]
+            
+            # Build lots section - LIMIT to 3 lots max to avoid length issues
             lots_text = ""
-            for lot in contract["lots"]:
-                winner = lot['winner_name']
+            max_lots_to_show = 3
+            lots_shown = 0
+            
+            for lot in contract["lots"][:max_lots_to_show]:
+                winner = str(lot['winner_name'])[:50]  # Limit winner name length
                 country = lot['winner_country']
                 
                 # Format value
                 if lot['tender_currency'] == 'EUR':
                     value_text = f"€{lot['eur_value']:,.0f}"
                 else:
-                    value_text = f"€{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})"
+                    value_text = f"€{lot['eur_value']:,.0f}"  # Removed conversion detail to save space
                 
-                lots_text += f"\n*Lot {lot['lot_id']}*\n"
-                lots_text += f"💰 {value_text}\n"
+                lots_text += f"\n*{lot['lot_id']}* • {value_text}\n"
                 lots_text += f"🏆 {winner}\n"
                 
-                # Stock lookup
-                ticker = self.stock_lookup.find_ticker(winner, country)
-                if ticker:
-                    stock_info = self.stock_lookup.get_stock_info(ticker)
-                    if stock_info:
-                        emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
-                        lots_text += f"📊 `{ticker}` {emoji} {stock_info['price']:.2f} {stock_info['currency']} ({stock_info['change_5d']:+.2f}%)\n"
+                # Stock lookup - ONLY if enabled
+                if self.stock_lookup.enabled:
+                    ticker = self.stock_lookup.find_ticker(winner, country)
+                    if ticker:
+                        stock_info = self.stock_lookup.get_stock_info(ticker)
+                        if stock_info:
+                            emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
+                            lots_text += f"📊 `{ticker}` {emoji} {stock_info['price']:.2f} ({stock_info['change_5d']:+.1f}%)\n"
                 
-                lots_text += "\n"
+                lots_shown += 1
+            
+            # Add "more lots" indicator if needed
+            remaining_lots = len(contract["lots"]) - lots_shown
+            if remaining_lots > 0:
+                lots_text += f"\n_+ {remaining_lots} more lot(s)_\n"
 
-            # Extract title
-            title = contract.get('title', 'N/A')
-            if isinstance(title, dict):
-                title = title.get('eng', title.get('swe', 'N/A'))
-            if isinstance(title, list):
-                title = title[0] if title else 'N/A'
-            title_short = title[:100] + "..." if len(str(title)) > 100 else title
-
+            # Build message - COMPACT VERSION
             msg = f"""
-🚨 *HIGH-VALUE CONTRACT* 🚨
+🚨 *HIGH-VALUE CONTRACT*
 
 *ID:* {contract['publication_number']}
-*Date:* {contract['publication_date']}
-*Title:* {title_short}
+*Date:* {contract['publication_date'][:10]}
 
 💰 *TOTAL: €{contract['total_eur']:,.0f}*
 
-*Buyer:* {contract['buyer_name']}
+*Buyer:* {buyer_name}
 *Country:* {contract['buyer_country']}
 
 *LOTS:*{lots_text}
-🔗 [View Full Contract]({contract['url']})
+🔗 [View Contract]({contract['url']})
             """
+
+            # Check length and truncate if needed
+            if len(msg) > 4000:  # Leave margin for safety
+                # Ultra-compact version
+                msg = f"""
+🚨 *HIGH-VALUE CONTRACT*
+
+*ID:* {contract['publication_number']}
+💰 *€{contract['total_eur']:,.0f}*
+
+*Buyer:* {buyer_name[:40]}
+*Country:* {contract['buyer_country']}
+
+*Lots:* {len(contract["lots"])}
+🔗 [View]({contract['url']})
+                """
 
             self._send(msg)
             logger.info(f"✅ Sent notification for {contract['publication_number']}")
 
         except Exception as e:
             logger.error(f"Notify error: {e}", exc_info=True)
+            # Fallback: Send minimal notification
+            try:
+                minimal_msg = f"🚨 *CONTRACT ALERT*\n\nID: {contract.get('publication_number')}\nValue: €{contract.get('total_eur', 0):,.0f}\n\n[View]({contract.get('url', '#')})"
+                self._send(minimal_msg)
+            except:
+                pass
 
     def _send(self, message: str):
         """Send message"""
