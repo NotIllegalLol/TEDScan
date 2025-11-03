@@ -31,6 +31,98 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+class StockLookup:
+    """Yahoo Finance stock ticker lookup"""
+
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.cache = {}
+
+    def get_stock_info(self, company_name: str, country: str = None) -> Optional[Dict]:
+        """Get stock ticker and info for a company"""
+        if not company_name or company_name == "N/A":
+            return None
+
+        # Check cache
+        cache_key = company_name.lower()
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        try:
+            # Clean company name
+            clean_name = company_name.upper().strip()
+
+            # Common suffixes to try
+            suffixes = ['', ' AB', ' AS', ' OYJ', ' SPA', ' SA', ' AG', ' PLC', ' LTD', ' INC', ' CORP']
+
+            # Try different exchange suffixes based on country
+            exchanges = self._get_exchanges(country)
+
+            for suffix in suffixes:
+                for exchange in exchanges:
+                    # Build ticker symbol
+                    if exchange:
+                        ticker_symbol = f"{clean_name}{suffix}.{exchange}"
+                    else:
+                        ticker_symbol = f"{clean_name}{suffix}"
+
+                    try:
+                        ticker = yf.Ticker(ticker_symbol)
+                        hist = ticker.history(period='5d')
+
+                        if not hist.empty and len(hist) >= 2:
+                            current_price = hist['Close'].iloc[-1]
+                            price_5d_ago = hist['Close'].iloc[0]
+                            change_pct = ((current_price - price_5d_ago) / price_5d_ago) * 100
+
+                            info = ticker.info
+                            currency = info.get('currency', 'USD')
+
+                            result = {
+                                'ticker': ticker_symbol,
+                                'price': current_price,
+                                'change_5d': change_pct,
+                                'currency': currency
+                            }
+
+                            self.cache[cache_key] = result
+                            return result
+
+                    except:
+                        continue
+
+            # Cache negative result
+            self.cache[cache_key] = None
+            return None
+
+        except Exception as e:
+            self.logger.debug(f"Stock lookup failed for {company_name}: {e}")
+            return None
+
+    def _get_exchanges(self, country: str) -> List[str]:
+        """Get stock exchange suffixes for a country"""
+        if not country:
+            return ['', 'US', 'L']
+
+        country = country.upper()
+        exchange_map = {
+            'SE': ['ST'],  # Sweden
+            'FI': ['HE'],  # Finland
+            'NO': ['OL'],  # Norway
+            'DK': ['CO'],  # Denmark
+            'DE': ['DE', 'F'],  # Germany
+            'FR': ['PA'],  # France
+            'GB': ['L'],   # UK
+            'IT': ['MI'],  # Italy
+            'ES': ['MC'],  # Spain
+            'NL': ['AS'],  # Netherlands
+            'CH': ['SW'],  # Switzerland
+            'US': [''],    # US (no suffix)
+        }
+
+        return exchange_map.get(country, ['', 'US', 'L'])
+
+
 class TEDDataCollector:
     """Complete TED collector with 3-step logic"""
 
@@ -135,8 +227,26 @@ class TEDDataCollector:
                     self.logger.error(f"Request error: {e}")
                     break
 
-            self.logger.info(f"Total fetched: {len(all_notices)}")
-            return all_notices
+            # Filter by actual publication date (last 2 days only)
+            cutoff_date = (datetime.now() - timedelta(days=2)).date()
+            filtered_notices = []
+            
+            for notice in all_notices:
+                pub_date_str = notice.get("publication-date")
+                if pub_date_str:
+                    try:
+                        # Parse date like "2025-11-03+01:00" -> get just the date part
+                        pub_date = datetime.strptime(pub_date_str.split('+')[0], "%Y-%m-%d").date()
+                        if pub_date >= cutoff_date:
+                            filtered_notices.append(notice)
+                    except:
+                        # If parsing fails, include it anyway
+                        filtered_notices.append(notice)
+                else:
+                    filtered_notices.append(notice)
+
+            self.logger.info(f"Total fetched: {len(all_notices)}, filtered to last 2 days: {len(filtered_notices)}")
+            return filtered_notices
 
         except Exception as e:
             self.logger.error(f"Fetch error: {e}", exc_info=True)
@@ -221,7 +331,7 @@ class TEDDataCollector:
 
         return lots
 
-    def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 15_000_000) -> List[Dict]:
+    def filter_high_value_results(self, notices: List[Dict], min_value_eur: float = 10_000_000) -> List[Dict]:
         """Filter for result contracts >= 15M EUR"""
         self.logger.info("STEP 3: FILTERING HIGH-VALUE RESULTS")
         self.logger.info(f"Filter: Form='result' AND Value >= €{min_value_eur:,.0f}")
@@ -293,6 +403,7 @@ class TEDTelegramBot:
         self.bot = telebot.TeleBot(bot_token)
         self.chat_id = chat_id
         self.collector = TEDDataCollector(api_key=ted_api_key)
+        self.stock_lookup = StockLookup()
         self.is_running = False
         self.notified = set()
 
@@ -317,8 +428,9 @@ Running 24/7 on Render.com!
 *Monitoring:*
 ✅ Scans every 10 minutes
 ✅ Form type: result
-✅ Min value: €15,000,000
+✅ Min value: €10,000,000
 ✅ Auto currency conversion
+✅ Stock ticker lookup
 
 You'll receive instant alerts for large contracts!
             """
@@ -331,7 +443,7 @@ You'll receive instant alerts for large contracts!
 *Status:* {status}
 *Interval:* 10 minutes
 *Notified:* {len(self.notified)} contracts
-*Threshold:* €15,000,000
+*Threshold:* €10,000,000
 *Platform:* Render.com
 *Uptime:* 24/7 (webhook mode)
             """
@@ -394,7 +506,7 @@ You'll receive instant alerts for large contracts!
             return 0
 
     def _notify(self, contract: dict):
-        """Send contract notification"""
+        """Send contract notification with stock info"""
         try:
             lots_text = ""
             for lot in contract["lots"]:
@@ -406,6 +518,14 @@ You'll receive instant alerts for large contracts!
                     lots_text += f"  Value: €{lot['eur_value']:,.0f}\n"
                 else:
                     lots_text += f"  Value: €{lot['eur_value']:,.0f} (from {lot['tender_value']:,.0f} {lot['tender_currency']})\n"
+
+                # Stock lookup
+                stock_info = self.stock_lookup.get_stock_info(lot['winner_name'], lot['winner_country'])
+                if stock_info:
+                    change_emoji = "📈" if stock_info['change_5d'] > 0 else "📉"
+                    lots_text += f"  Stock: `{stock_info['ticker']}`\n"
+                    lots_text += f"  Price: {stock_info['price']:.2f} {stock_info['currency']}\n"
+                    lots_text += f"  5d Change: {stock_info['change_5d']:+.2f}% {change_emoji}\n"
 
             msg = f"""
 🚨 *HIGH-VALUE CONTRACT!* 🚨
@@ -447,11 +567,19 @@ _Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_
     def _monitoring_loop(self):
         """Auto-scan every 10 minutes"""
         logger.info("Monitoring started")
-        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€15M.")
+        self._send("✅ *TED Monitor Started!*\n\nScanning every 10 minutes.\nYou'll receive alerts for contracts ≥€10M.")
 
+        last_daily_check = datetime.now()
+        
         while self.is_running:
             try:
                 self._scan()
+
+                # Send daily "still alive" message
+                now = datetime.now()
+                if (now - last_daily_check).total_seconds() >= 86400:  # 24 hours
+                    self._send(f"✅ *Daily Check-In*\n\nBot is still running!\nNotified: {len(self.notified)} contracts\nTime: {now.strftime('%Y-%m-%d %H:%M')}")
+                    last_daily_check = now
 
                 if self.is_running:
                     logger.info("Waiting 10 minutes...")
