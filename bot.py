@@ -159,20 +159,20 @@ class TEDDataCollector:
             return amount
         return amount * self.rates.get(currency.upper(), 1.0)
 
-    def fetch_all_contracts(self, days_back: int = 2) -> List[Dict]:
-        """Fetch contracts from TED API"""
+    def fetch_all_contracts(self, days_back: int = 1) -> List[Dict]:
+        """Fetch contracts from TED API - ONLY LAST 1 DAY"""
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
             start_str = start_date.strftime("%Y%m%d")
             end_str = end_date.strftime("%Y%m%d")
 
-            self.logger.info(f"📡 Fetching from {start_str} to {end_str} (last {days_back} days)")
+            self.logger.info(f"📡 Fetching from {start_str} to {end_str} (last {days_back} day)")
 
             all_notices = []
             page = 1
             limit = 50
-            max_pages = 15  # Reduced for 4 days
+            max_pages = 10  # Reduced for 1 day
 
             while page <= max_pages:
                 query = f"PD>={start_str} AND PD<={end_str}"
@@ -219,8 +219,34 @@ class TEDDataCollector:
                 page += 1
                 time.sleep(0.5)
 
-            self.logger.info(f"✓ Fetched {len(all_notices)} total notices")
-            return all_notices
+            # ADDITIONAL FILTER: Only keep contracts from last 24 hours
+            cutoff_datetime = datetime.now() - timedelta(hours=24)
+            filtered_notices = []
+            
+            for notice in all_notices:
+                pub_date_str = notice.get("publication-date")
+                if pub_date_str:
+                    try:
+                        # Parse "2025-11-03+01:00" format
+                        pub_date_clean = pub_date_str.split('+')[0].split('T')[0]
+                        pub_date = datetime.strptime(pub_date_clean, "%Y-%m-%d")
+                        
+                        # Only include if published in last 24 hours
+                        if pub_date >= cutoff_datetime.replace(hour=0, minute=0, second=0):
+                            filtered_notices.append(notice)
+                            self.logger.debug(f"Including: {notice.get('publication-number')} from {pub_date_clean}")
+                        else:
+                            self.logger.debug(f"Skipping old: {notice.get('publication-number')} from {pub_date_clean}")
+                    except Exception as e:
+                        # If parsing fails, include it to be safe
+                        self.logger.debug(f"Date parse error, including anyway: {e}")
+                        filtered_notices.append(notice)
+                else:
+                    # No date, include it
+                    filtered_notices.append(notice)
+
+            self.logger.info(f"✓ Fetched {len(all_notices)} total, filtered to {len(filtered_notices)} from last 24 hours")
+            return filtered_notices
 
         except Exception as e:
             self.logger.error(f"Fetch error: {e}", exc_info=True)
@@ -443,7 +469,7 @@ class TEDTelegramBot:
 *Commands:*
 /start - Show this message
 /status - Bot status
-/scan - Scan now (4 days)
+/scan - Scan now (24 hours)
 /test - Test scan (lower threshold)
 /stock Company Name - Lookup stock
 /clear - Clear notification history
@@ -452,7 +478,8 @@ class TEDTelegramBot:
 
 *Monitoring:*
 ✅ Auto-scans every 10 minutes
-✅ Last 4 days • Result contracts only
+✅ Last 24 hours only (fresh contracts)
+✅ Result contracts only
 ✅ Threshold: €15,000,000
 ✅ Stock ticker lookup enabled
             """
@@ -471,16 +498,16 @@ class TEDTelegramBot:
 
         @self.bot.message_handler(commands=['scan'])
         def run_scan(message):
-            self.bot.reply_to(message, "🔍 Scanning last 4 days...")
-            count = self._scan(days_back=2)
+            self.bot.reply_to(message, "🔍 Scanning last 24 hours...")
+            count = self._scan(days_back=1)
             self.bot.reply_to(message, f"✅ Scan complete! Sent {count} new alerts")
         
         @self.bot.message_handler(commands=['test'])
         def test_scan(message):
             """Test with €5M threshold"""
-            self.bot.reply_to(message, "🧪 Testing with €5M threshold (4 days)...")
+            self.bot.reply_to(message, "🧪 Testing with €5M threshold (24 hours)...")
             try:
-                notices = self.collector.fetch_all_contracts(days_back=2)
+                notices = self.collector.fetch_all_contracts(days_back=1)
                 test_contracts = self.collector.filter_high_value_results(notices, min_value_eur=5_000_000)
                 
                 msg = f"Found {len(test_contracts)} contracts >= €5M\n\n"
@@ -530,11 +557,11 @@ class TEDTelegramBot:
             self.is_running = True
             self.bot.reply_to(message, "▶️ Resumed")
 
-    def _scan(self, days_back: int = 2) -> int:
-        """Run scan"""
+    def _scan(self, days_back: int = 1) -> int:
+        """Run scan - ONLY LAST 24 HOURS"""
         try:
             logger.info("="*60)
-            logger.info("🔍 STARTING TED SCAN")
+            logger.info("🔍 STARTING TED SCAN (LAST 24 HOURS)")
             logger.info("="*60)
 
             notices = self.collector.fetch_all_contracts(days_back=days_back)
@@ -553,10 +580,10 @@ class TEDTelegramBot:
             for contract in high_value:
                 pub_num = str(contract["publication_number"])
 
-                # Check if already notified (keep for 4 days)
+                # Check if already notified (keep for 1 day only)
                 if pub_num in self.notified:
                     age = datetime.now() - self.notified[pub_num]
-                    if age.days < 4:
+                    if age.total_seconds() < 86400:  # 24 hours
                         logger.info(f"Skipping {pub_num} (already notified)")
                         continue
 
@@ -641,11 +668,11 @@ class TEDTelegramBot:
     def _monitoring_loop(self):
         """Auto-scan every 10 minutes"""
         logger.info("🔄 Monitoring loop started")
-        self._send("✅ *Monitor Started!*\n\nScanning every 10 minutes\nLast 4 days • Result contracts • ≥€15M")
+        self._send("✅ *Monitor Started!*\n\nScanning every 10 minutes\n📅 Last 24 hours only\n📋 Result contracts\n💰 ≥€15M")
 
         while self.is_running:
             try:
-                self._scan(days_back=4)  # 4 days to avoid rate limits
+                self._scan(days_back=1)  # Only last 24 hours
                 
                 if self.is_running:
                     logger.info("⏳ Waiting 10 minutes...")
